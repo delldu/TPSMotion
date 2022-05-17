@@ -50,6 +50,8 @@ def load_checkpoints(config_path, checkpoint_path, device):
     avd_network.to(device)
        
     checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # pdb.set_trace()
  
     inpainting.load_state_dict(checkpoint['inpainting_network'])
     kp_detector.load_state_dict(checkpoint['kp_detector'])
@@ -75,13 +77,16 @@ def make_animation(source_image, driving_video, inpainting_network, kp_detector,
         kp_source = kp_detector(source)
         kp_driving_initial = kp_detector(driving[:, :, 0])
 
+        # pp source.size() -- [1, 3, 256, 256]
+        # driving.shape --  [1, 3, 211, 256, 256]
+
         for frame_idx in tqdm(range(driving.shape[2])):
             driving_frame = driving[:, :, frame_idx]
             driving_frame = driving_frame.to(device)
             kp_driving = kp_detector(driving_frame)
             if mode == 'standard':
                 kp_norm = kp_driving
-            elif mode=='relative':
+            elif mode=='relative': # True
                 kp_norm = relative_kp(kp_source=kp_source, kp_driving=kp_driving,
                                     kp_driving_initial=kp_driving_initial)
             elif mode == 'avd':
