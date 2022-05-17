@@ -14,6 +14,7 @@ from modules.inpainting_network import InpaintingNetwork
 from modules.keypoint_detector import KPDetector
 from modules.dense_motion import DenseMotionNetwork
 from modules.avd_network import AVDNetwork
+import pdb
 
 if sys.version_info[0] < 3:
     raise Exception("You must use Python 3 or higher. Recommended version is Python 3.9")
@@ -34,7 +35,7 @@ def relative_kp(kp_source, kp_driving, kp_driving_initial):
 
 def load_checkpoints(config_path, checkpoint_path, device):
     with open(config_path) as f:
-        config = yaml.load(f)
+        config = yaml.safe_load(f)
 
     inpainting = InpaintingNetwork(**config['model_params']['generator_params'],
                                         **config['model_params']['common_params'])
