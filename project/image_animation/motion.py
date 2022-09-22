@@ -12,46 +12,48 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torchvision import models
+from typing import List
 import math
 import pdb
 
 
 class TPS:
     """
-    TPS transformation, mode 'kp' for Eq(2) in the paper, mode 'random' for equivariance loss.
+    TPS transformation for Eq(2) in the paper
     """
 
-    def __init__(self, bs, kp_1, kp_2):
+    def __init__(self, bs: int, kp_1, kp_2):
+        # kp_1 -- [1, 10, 5, 2]
+        # kp_2 -- [1, 10, 5, 2]
+
         self.bs = bs  # 1
-        # kp_1 = kwargs["kp_1"] # [1, 10, 5, 2]
-        # kp_2 = kwargs["kp_2"] # [1, 10, 5, 2]
-        device = kp_1.device
         self.gs = kp_1.shape[1]  # 10
-        n = kp_1.shape[2]
+        N = kp_1.shape[2]
+
         K = torch.norm(kp_1[:, :, :, None] - kp_1[:, :, None, :], dim=4, p=2)
         # K.size() -- [1, 10, 5, 5]
         K = K ** 2
         K = K * torch.log(K + 1e-9)
 
-        one1 = torch.ones(self.bs, kp_1.shape[1], kp_1.shape[2], 1).to(device)
-        # one1.size() -- [1, 10, 5, 1]
-        kp_1p = torch.cat([kp_1, one1], dim=3)  # kp_1.size()--[1,10,5,2] ==> [1,10,5,3]
+        one = torch.ones(self.bs, self.gs, N, 1).to(kp_1.device)
+        # one.size() -- [1, 10, 5, 1]
+        kp_1p = torch.cat([kp_1, one], dim=3)  # kp_1.size()--[1,10,5,2] ==> [1,10,5,3]
 
-        zero = torch.zeros(self.bs, kp_1.shape[1], 3, 3).to(device)
+        zero = torch.zeros(self.bs, self.gs, 3, 3).to(kp_1.device)
         P = torch.cat([kp_1p, zero], dim=2)  # [1, 10, 8, 3]
         L = torch.cat([K, kp_1p.permute(0, 1, 3, 2)], dim=2)
         L = torch.cat([L, P], dim=3)  # ==> # [1, 10, 8, 8]
 
-        zero = torch.zeros(self.bs, kp_1.shape[1], 3, 2).to(device)
-        Y = torch.cat([kp_2, zero], 2)
-        one = torch.eye(L.shape[2]).expand(L.shape).to(device) * 0.01
-        L = L + one  # # [1, 10, 8, 8]
+        zero = torch.zeros(self.bs, self.gs, 3, 2).to(kp_1.device)
+        Y = torch.cat([kp_2, zero], dim=2)
+        one = torch.eye(L.shape[2]).expand(L.shape).to(kp_1.device) * 0.01
+        L = L + one  # [1, 10, 8, 8]
 
         param = torch.matmul(torch.inverse(L), Y)
-        self.theta = param[:, :, n:, :].permute(0, 1, 3, 2)  # [1, 10, 2, 3]
+        self.theta = param[:, :, N:, :].permute(0, 1, 3, 2)  # [1, 10, 2, 3]
 
         self.control_points = kp_1  # [1, 10, 5, 2]
-        self.control_params = param[:, :, :n, :]  # [1, 10, 5, 2]
+        self.control_params = param[:, :, :N, :]  # [1, 10, 5, 2]
 
     def transform_frame(self, frame):
         # frame.size() -- [1, 3, 64, 64]
@@ -60,14 +62,14 @@ class TPS:
         # grid.size() -- [1, 64, 64, 2]
         grid = grid.view(1, H * W, 2)  # [1, 4096, 2]
 
-        shape = [self.bs, self.gs, H, W, 2]
-        grid = self.warp_coordinates(grid).view(*shape)
+        # shape = [self.bs, self.gs, H, W, 2]
+        grid = self.warp_coordinates(grid).view(self.bs, self.gs, H, W, 2)
         return grid  # [1, 10, 64, 64, 2]
 
     def warp_coordinates(self, coordinates):
-        theta = self.theta.type(coordinates.type()).to(coordinates.device)
-        control_points = self.control_points.type(coordinates.type()).to(coordinates.device)
-        control_params = self.control_params.type(coordinates.type()).to(coordinates.device)
+        theta = self.theta.to(coordinates.device)
+        control_points = self.control_points.to(coordinates.device)
+        control_params = self.control_params.to(coordinates.device)
 
         transformed = torch.matmul(theta[:, :, :, :2], coordinates.permute(0, 2, 1)) + theta[:, :, :, 2:]
         distances = coordinates.view(coordinates.shape[0], 1, 1, -1, 2) - control_points.view(
@@ -88,20 +90,16 @@ def kp2gaussian(kp, H: int, W: int):
     Transform a keypoint into gaussian like representation
     """
     # kp.size() -- [1, 50, 2]
-    # spatial_size = torch.Size([64, 64])
+    # H, W = 64, 64
 
-    kp_variance = 0.01
+    B, N, _ = kp.shape
     coordinate_grid = make_coordinate_grid(H, W).to(kp.device)  # [64, 64, 2]
-    number_of_leading_dimensions = len(kp.shape) - 1  # 2
-    shape = (1,) * number_of_leading_dimensions + coordinate_grid.shape
-    coordinate_grid = coordinate_grid.view(*shape)
-    repeats = kp.shape[:number_of_leading_dimensions] + (1, 1, 1)
-    coordinate_grid = coordinate_grid.repeat(*repeats)  # [1, 50, 64, 64, 2]
+    coordinate_grid = coordinate_grid.view(1, 1, H, W, 2)  # [1, 1, 64, 64, 2]
+    coordinate_grid = coordinate_grid.repeat(B, N, 1, 1, 1)  # ==> [1, 50, 64, 64, 2]
 
-    # Preprocess kp shape
-    shape = kp.shape[:number_of_leading_dimensions] + (1, 1, 2)
-    kp = kp.view(*shape)
+    kp = kp.view(B, N, 1, 1, 2)
     mean_sub = coordinate_grid - kp
+    kp_variance = 0.01
     out = torch.exp(-0.5 * (mean_sub ** 2).sum(-1) / kp_variance)
 
     return out  # [1, 50, 64, 64]
@@ -109,7 +107,7 @@ def kp2gaussian(kp, H: int, W: int):
 
 def make_coordinate_grid(H: int, W: int):
     """
-    Create a meshgrid [-1,1] x [-1,1] of given spatial_size.
+    Create a meshgrid [-1,1] x [-1,1] of given (H, W).
     """
     x = torch.arange(W)
     y = torch.arange(H)
@@ -120,7 +118,7 @@ def make_coordinate_grid(H: int, W: int):
     yy = y.view(-1, 1).repeat(1, W)
     xx = x.view(1, -1).repeat(H, 1)
 
-    meshed = torch.cat([xx.unsqueeze_(2), yy.unsqueeze_(2)], 2)
+    meshed = torch.cat([xx.unsqueeze_(2), yy.unsqueeze_(2)], dim=2)
 
     return meshed
 
@@ -166,7 +164,7 @@ class UpBlock2d(nn.Module):
         self.norm = nn.InstanceNorm2d(out_features, affine=True)
 
     def forward(self, x):
-        out = F.interpolate(x, scale_factor=2)
+        out = F.interpolate(x, scale_factor=2.0, recompute_scale_factor=True)
         out = self.conv(out)
         out = self.norm(out)
         out = F.relu(out)
@@ -262,18 +260,15 @@ class Decoder(nn.Module):
         self.out_channels.append(block_expansion + in_features)
         # self.out_filters = block_expansion + in_features
 
-    def forward(self, x, mode=0):
+    def forward(self, x: List[torch.Tensor]) -> List[torch.Tensor]:
         out = x.pop()
-        outs = []
+        outs: List[torch.Tensor] = []
         for up_block in self.up_blocks:
             out = up_block(out)
             skip = x.pop()
             out = torch.cat([out, skip], dim=1)
             outs.append(out)
-        if mode == 0:
-            return out
-        else:
-            return outs
+        return outs
 
 
 class Hourglass(nn.Module):
@@ -288,8 +283,8 @@ class Hourglass(nn.Module):
         self.out_channels = self.decoder.out_channels
         # self.out_filters = self.decoder.out_filters
 
-    def forward(self, x, mode=0):
-        return self.decoder(self.encoder(x), mode)
+    def forward(self, x) -> List[torch.Tensor]:
+        return self.decoder(self.encoder(x))
 
 
 class AntiAliasInterpolation2d(nn.Module):
@@ -297,7 +292,7 @@ class AntiAliasInterpolation2d(nn.Module):
     Band-limited downsampling, for better preservation of the input signal.
     """
 
-    def __init__(self, channels, scale):
+    def __init__(self, channels, scale=0.25):
         super(AntiAliasInterpolation2d, self).__init__()
         sigma = (1 / scale - 1) / 2
         kernel_size = 2 * round(sigma * 4) + 1
@@ -325,26 +320,13 @@ class AntiAliasInterpolation2d(nn.Module):
         self.scale = scale
 
     def forward(self, input):
-        if self.scale == 1.0:
-            return input
-
+        # if self.scale == 1.0: # self.scale -- 0.25
+        #     return input
         out = F.pad(input, (self.ka, self.kb, self.ka, self.kb))
         out = F.conv2d(out, weight=self.weight, groups=self.groups)
-        out = F.interpolate(out, scale_factor=(self.scale, self.scale))
+        out = F.interpolate(out, scale_factor=(self.scale, self.scale), recompute_scale_factor=True)
 
         return out
-
-
-def to_homogeneous(coordinates):
-    ones_shape = list(coordinates.shape)
-    ones_shape[-1] = 1
-    ones = torch.ones(ones_shape).type(coordinates.type())
-
-    return torch.cat([coordinates, ones], dim=-1)
-
-
-def from_homogeneous(coordinates):
-    return coordinates[..., :2] / coordinates[..., 2:3]
 
 
 class KPDetector(nn.Module):
@@ -394,11 +376,11 @@ class DenseMotionNetwork(nn.Module):
         self.maps = nn.Conv2d(hourglass_output_size[-1], num_tps + 1, kernel_size=(7, 7), padding=(3, 3))
 
         up = []
-        self.up_nums = int(math.log(1 / scale_factor, 2))
+        self.up_nums = int(math.log(1 / scale_factor, 2))  # 2
         self.occlusion_num = 4
 
         channel = [hourglass_output_size[-1] // (2 ** i) for i in range(self.up_nums)]
-        for i in range(self.up_nums):
+        for i in range(self.up_nums):  # 2
             up.append(UpBlock2d(channel[i], channel[i] // 2, kernel_size=3, padding=1))
         self.up = nn.ModuleList(up)
 
@@ -407,7 +389,7 @@ class DenseMotionNetwork(nn.Module):
             channel.append(hourglass_output_size[-1] // (2 ** (i + 1)))
 
         occlusion = []
-        for i in range(self.occlusion_num):
+        for i in range(self.occlusion_num):  # 4
             occlusion.append(nn.Conv2d(channel[i], 1, kernel_size=(7, 7), padding=(3, 3)))
         self.occlusion = nn.ModuleList(occlusion)
 
@@ -428,8 +410,6 @@ class DenseMotionNetwork(nn.Module):
         # K TPS transformaions
         B, C, H, W = source_image.shape
 
-        # kp_1 = kp_driving
-        # kp_2 = kp_source
         kp_driving = kp_driving.view(B, -1, 5, 2)
         kp_source = kp_source.view(B, -1, 5, 2)
         trans = TPS(B, kp_driving, kp_source)
@@ -452,24 +432,20 @@ class DenseMotionNetwork(nn.Module):
         source_repeat = source_image.unsqueeze(1).unsqueeze(1).repeat(1, self.num_tps + 1, 1, 1, 1, 1)
         source_repeat = source_repeat.view(B * (self.num_tps + 1), -1, H, W)
         transformations = transformations.view((B * (self.num_tps + 1), H, W, -1))
-        deformed = F.grid_sample(source_repeat, transformations, align_corners=True)
-        deformed = deformed.view((B, self.num_tps + 1, -1, H, W))
+        deformed_source = F.grid_sample(source_repeat, transformations, align_corners=True)
+        return deformed_source.view(B, self.num_tps + 1, -1, H, W)  # # [1, 11, 3, 64, 64]
 
-        return deformed  # [1, 11, 3, 64, 64]
-
-    def forward(self, source_image, kp_driving, kp_source):
+    def forward(self, source_image, kp_driving, kp_source) -> List[torch.Tensor]:
         source_image = self.down(source_image)
         B, C, H, W = source_image.shape
 
-        out_dict = dict()
-        heatmap_representation = self.create_heatmap(source_image, kp_driving, kp_source)
+        heatmap = self.create_heatmap(source_image, kp_driving, kp_source)
         transformations = self.create_transformations(source_image, kp_driving, kp_source)
         deformed_source = self.create_deformed_source(source_image, transformations)
         deformed_source = deformed_source.view(B, -1, H, W)
-        input = torch.cat([heatmap_representation, deformed_source], dim=1)
-        input = input.view(B, -1, H, W)
+        input = torch.cat([heatmap, deformed_source], dim=1).view(B, -1, H, W)
 
-        prediction = self.hourglass(input, mode=1)
+        prediction = self.hourglass(input)  # List[torch.Tensor]
 
         contribution_maps = self.maps(prediction[-1])
         contribution_maps = F.softmax(contribution_maps, dim=1)
@@ -481,19 +457,24 @@ class DenseMotionNetwork(nn.Module):
         deformation = (transformations * contribution_maps).sum(dim=1)
         deformation = deformation.permute(0, 2, 3, 1)
 
-        out_dict["deformation"] = deformation  # Optical Flow
+        dense_motion_output = [deformation]  # Optical Flow
 
-        occlusion_map = []
+        for i, oc_block in enumerate(self.occlusion):  # 4
+            if i < self.occlusion_num - self.up_nums:  # 2
+                j = self.up_nums - self.occlusion_num + i
+                # i --> [0, 1], j --> [-2, -1]
+                t = oc_block(prediction[j])
+                dense_motion_output.append(torch.sigmoid(t))  # occlusion_map
 
-        for i in range(self.occlusion_num - self.up_nums):
-            occlusion_map.append(torch.sigmoid(self.occlusion[i](prediction[self.up_nums - self.occlusion_num + i])))
         prediction = prediction[-1]
-        for i in range(self.up_nums):
-            prediction = self.up[i](prediction)
-            occlusion_map.append(torch.sigmoid(self.occlusion[i + self.occlusion_num - self.up_nums](prediction)))
+        for i, up_block in enumerate(self.up):  # 2
+            prediction = up_block(prediction)
+            for j, oc_block in enumerate(self.occlusion):  # 4
+                if j == i + self.occlusion_num - self.up_nums:  # i->[0, 1], j -> [2, 3]
+                    t = oc_block(prediction)
+                    dense_motion_output.append(torch.sigmoid(t))  # occlusion_map
 
-        out_dict["occlusion_map"] = occlusion_map  # Multi-resolution Occlusion Masks
-        return out_dict
+        return dense_motion_output  # deformation, occlusion_map[...]
 
 
 class InpaintingNetwork(nn.Module):
@@ -503,7 +484,6 @@ class InpaintingNetwork(nn.Module):
 
     def __init__(self, num_channels=3, block_expansion=64, max_features=512, num_down_blocks=3):
         super(InpaintingNetwork, self).__init__()
-        # kwargs = {'num_tps': 10, 'bg': True}
 
         self.num_down_blocks = num_down_blocks
         self.first = SameBlock2d(num_channels, block_expansion, kernel_size=(7, 7), padding=(3, 3))
@@ -518,80 +498,73 @@ class InpaintingNetwork(nn.Module):
         up_blocks = []
         in_features = [max_features, max_features, max_features // 2]
         out_features = [max_features // 2, max_features // 4, max_features // 8]
-        for i in range(num_down_blocks):
+        for i in range(num_down_blocks):  # 3
             up_blocks.append(UpBlock2d(in_features[i], out_features[i], kernel_size=(3, 3), padding=(1, 1)))
         self.up_blocks = nn.ModuleList(up_blocks)
 
         resblock = []
-        for i in range(num_down_blocks):
+        for i in range(num_down_blocks):  # 3
             resblock.append(ResBlock2d(in_features[i], kernel_size=(3, 3), padding=(1, 1)))
             resblock.append(ResBlock2d(in_features[i], kernel_size=(3, 3), padding=(1, 1)))
         self.resblock = nn.ModuleList(resblock)
 
         self.final = nn.Conv2d(block_expansion, num_channels, kernel_size=(7, 7), padding=(3, 3))
-        self.num_channels = num_channels
+        # self.num_channels = num_channels
 
-    def deform_input(self, inp, deformation):
+    def deform_input(self, input, deformation):
         _, h_old, w_old, _ = deformation.shape
-        _, _, h, w = inp.shape
+        _, _, h, w = input.shape
         if h_old != h or w_old != w:
             deformation = deformation.permute(0, 3, 1, 2)
             deformation = F.interpolate(deformation, size=(h, w), mode="bilinear", align_corners=True)
             deformation = deformation.permute(0, 2, 3, 1)
-        return F.grid_sample(inp, deformation, align_corners=True)
+        return F.grid_sample(input, deformation, align_corners=True)
 
-    def occlude_input(self, inp, occlusion_map):
-        out = inp * occlusion_map
-        return out
+    def occlude_input(self, input, occlusion_map):
+        return input * occlusion_map
 
-    def forward(self, source_image, dense_motion):
+    def forward(self, source_image, dense_motion: List[torch.Tensor]):
         out = self.first(source_image)
         encoder_map = [out]
-        for i in range(len(self.down_blocks)):
-            out = self.down_blocks[i](out)
+        for i, block in enumerate(self.down_blocks):  # 3
+            out = block(out)
             encoder_map.append(out)
 
-        occlusion_map = dense_motion["occlusion_map"]
-        deformation = dense_motion["deformation"]
+        deformation = dense_motion[0]
+        occlusion_map = dense_motion[1:]
+
         out = self.deform_input(out, deformation)
         out = self.occlude_input(out, occlusion_map[0])
 
-        for i in range(self.num_down_blocks):
-            out = self.resblock[2 * i](out)
-            out = self.resblock[2 * i + 1](out)
-            out = self.up_blocks[i](out)
-
+        for i, up_block in enumerate(self.up_blocks):  # 3
+            for j, re_block in enumerate(self.resblock):
+                if j == 2 * i or j == 2 * i + 1:
+                    out = re_block(out)
+            out = up_block(out)
+            # i --> [0, 1, 2], -(i + 2) --> [-2, -3, -4]
             encode_i = encoder_map[-(i + 2)]
             encode_i = self.deform_input(encode_i, deformation)
             encode_i = self.occlude_input(encode_i, occlusion_map[i + 1])
 
-            if i == self.num_down_blocks - 1:
-                break
-
-            out = torch.cat([out, encode_i], dim=1)
+            if i < self.num_down_blocks - 1:
+                out = torch.cat([out, encode_i], dim=1)
 
         deformed_source = self.deform_input(source_image, deformation)
-        # output_dict["deformed"] = deformed_source
-        # output_dict["warped_encoder_maps"] = warped_encoder_maps
 
         occlusion_last = occlusion_map[-1]
+        out = out * (1.0 - occlusion_last) + encode_i
+        out = torch.sigmoid(self.final(out))
+        out = out * (1.0 - occlusion_last) + deformed_source * occlusion_last
 
-        out = out * (1 - occlusion_last) + encode_i
-        out = self.final(out)
-        out = torch.sigmoid(out)
-        out = out * (1 - occlusion_last) + deformed_source * occlusion_last
-        # output_dict["prediction"] = out
-
-        return out  # output_dict
+        return out
 
 
 class ImageAnimation(nn.Module):
     def __init__(self):
         super(ImageAnimation, self).__init__()
-
-        self.generator = InpaintingNetwork()
         self.kpdetector = KPDetector()
         self.densemotion = DenseMotionNetwork()
+        self.generator = InpaintingNetwork()
 
         # checkpoint_path = "../checkpoints/vox.pth.tar"
         # checkpoint = torch.load(checkpoint_path)
@@ -608,4 +581,4 @@ class ImageAnimation(nn.Module):
 
         dense_motion = self.densemotion(source, kp_source_normal, kp_source)
         out = self.generator(source, dense_motion)
-        return out
+        return out.clamp(0.0, 1.0)

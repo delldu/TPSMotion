@@ -23,6 +23,8 @@ from . import motion
 
 import pdb
 
+IMAGE_SIZE = 256
+
 
 def get_model():
     """Create model."""
@@ -36,6 +38,11 @@ def get_model():
     device = todos.model.get_device()
     model = model.to(device)
     model.eval()
+
+    todos.data.mkdir("output")
+    if not os.path.exists("output/image_animation.torch"):
+        model = torch.jit.script(model)
+        model.save("output/image_animation.torch")
 
     return model, device
 
@@ -60,7 +67,7 @@ def video_service(input_file, output_file, targ):
         return False
 
     # load face image
-    source_image = Image.open(face_file).convert("RGB").resize((256, 256))
+    source_image = Image.open(face_file).convert("RGB").resize((IMAGE_SIZE, IMAGE_SIZE))
     source_tensor = transforms.ToTensor()(source_image).unsqueeze(0)
 
     # Create directory to store result
@@ -72,7 +79,7 @@ def video_service(input_file, output_file, targ):
 
     print(f"{input_file} driving {face_file}, save to {output_file} ...")
     progress_bar = tqdm(total=video.n_frames)
-    first_driving_tensor = torch.zeros(1, 3, 256, 256)
+    first_driving_tensor = torch.zeros(1, 3, IMAGE_SIZE, IMAGE_SIZE)
 
     def clean_video_frame(no, data):
         global first_driving_tensor
@@ -84,7 +91,7 @@ def video_service(input_file, output_file, targ):
 
         # convert tensor from 1x4xHxW to 1x3xHxW
         driving_tensor = driving_tensor[:, 0:3, :, :]
-        driving_tensor = todos.data.resize_tensor(driving_tensor, 256, 256)
+        driving_tensor = todos.data.resize_tensor(driving_tensor, IMAGE_SIZE, IMAGE_SIZE)
 
         if no == 0:
             first_driving_tensor = driving_tensor
