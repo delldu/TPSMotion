@@ -1,3 +1,5 @@
+import pdb
+
 import matplotlib
 matplotlib.use('Agg')
 import sys
@@ -5,6 +7,7 @@ import yaml
 from argparse import ArgumentParser
 from tqdm import tqdm
 from scipy.spatial import ConvexHull
+
 import numpy as np
 import imageio
 from skimage.transform import resize
@@ -14,21 +17,22 @@ from modules.inpainting_network import InpaintingNetwork
 from modules.keypoint_detector import KPDetector
 from modules.dense_motion import DenseMotionNetwork
 from modules.avd_network import AVDNetwork
-import pdb
 
 if sys.version_info[0] < 3:
     raise Exception("You must use Python 3 or higher. Recommended version is Python 3.9")
 
 def relative_kp(kp_source, kp_driving, kp_driving_initial):
-
-    source_area = ConvexHull(kp_source['fg_kp'][0].data.cpu().numpy()).volume
-    driving_area = ConvexHull(kp_driving_initial['fg_kp'][0].data.cpu().numpy()).volume
-    adapt_movement_scale = np.sqrt(source_area) / np.sqrt(driving_area)
+    # source_area = ConvexHull(kp_source['fg_kp'][0].data.cpu().numpy()).volume
+    # driving_area = ConvexHull(kp_driving_initial['fg_kp'][0].data.cpu().numpy()).volume
+    # adapt_movement_scale = np.sqrt(source_area) / np.sqrt(driving_area)
+    # print("adapt_movement_scale: ", adapt_movement_scale) # ==> 0.9961
 
     kp_new = {k: v for k, v in kp_driving.items()}
 
     kp_value_diff = (kp_driving['fg_kp'] - kp_driving_initial['fg_kp'])
-    kp_value_diff *= adapt_movement_scale
+    # print("kp_value_diff: ", kp_value_diff)
+
+    # kp_value_diff *= adapt_movement_scale
     kp_new['fg_kp'] = kp_value_diff + kp_source['fg_kp']
 
     return kp_new
@@ -69,6 +73,7 @@ def load_checkpoints(config_path, checkpoint_path, device):
 
 def make_animation(source_image, driving_video, inpainting_network, kp_detector, dense_motion_network, avd_network, device, mode = 'relative'):
     assert mode in ['standard', 'relative', 'avd']
+
     with torch.no_grad():
         predictions = []
         source = torch.tensor(source_image[np.newaxis].astype(np.float32)).permute(0, 3, 1, 2)
@@ -91,12 +96,15 @@ def make_animation(source_image, driving_video, inpainting_network, kp_detector,
                                     kp_driving_initial=kp_driving_initial)
             elif mode == 'avd':
                 kp_norm = avd_network(kp_source, kp_driving)
+            # dense_motion = dense_motion_network(source_image=source, kp_driving=kp_norm,
+            #                                         kp_source=kp_source, 
+            #                                         dropout_flag = False)
             dense_motion = dense_motion_network(source_image=source, kp_driving=kp_norm,
-                                                    kp_source=kp_source, bg_param = None, 
-                                                    dropout_flag = False)
+                                                    kp_source=kp_source)
+
             out = inpainting_network(source, dense_motion)
 
-            predictions.append(np.transpose(out['prediction'].data.cpu().numpy(), [0, 2, 3, 1])[0])
+            predictions.append(np.transpose(out.data.cpu().numpy(), [0, 2, 3, 1])[0])
     return predictions
 
 
@@ -163,11 +171,13 @@ if __name__ == "__main__":
     else:
         device = torch.device('cuda')
     
+    # pp opt.img_shape -- [256, 256]
+
     source_image = resize(source_image, opt.img_shape)[..., :3]
     driving_video = [resize(frame, opt.img_shape)[..., :3] for frame in driving_video]
     inpainting, kp_detector, dense_motion_network, avd_network = load_checkpoints(config_path = opt.config, checkpoint_path = opt.checkpoint, device = device)
  
-    if opt.find_best_frame:
+    if opt.find_best_frame: # False
         i = find_best_frame(source_image, driving_video, opt.cpu)
         print ("Best frame: " + str(i))
         driving_forward = driving_video[i:]
@@ -176,6 +186,10 @@ if __name__ == "__main__":
         predictions_backward = make_animation(source_image, driving_backward, inpainting, kp_detector, dense_motion_network, avd_network, device = device, mode = opt.mode)
         predictions = predictions_backward[::-1] + predictions_forward[1:]
     else:
+        # source_image.shape -- (256, 256, 3), range: 0.0 - 1.0
+        # len(driving_video), driving_video[0].shape, driving_video[0].min(), driving_video[0].max()
+        # -- (211, (256, 256, 3), 0.0, 1.0)
+
         predictions = make_animation(source_image, driving_video, inpainting, kp_detector, dense_motion_network, avd_network, device = device, mode = opt.mode)
     
     imageio.mimsave(opt.result_video, [img_as_ubyte(frame) for frame in predictions], fps=fps)

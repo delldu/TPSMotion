@@ -1,4 +1,4 @@
-
+import pdb
 import torch
 from torch import nn
 
@@ -8,8 +8,12 @@ class AVDNetwork(nn.Module):
     Animation via Disentanglement network
     """
 
-    def __init__(self, num_tps, id_bottle_size=64, pose_bottle_size=64):
+    def __init__(self, num_tps=10, id_bottle_size=64, pose_bottle_size=64):
         super(AVDNetwork, self).__init__()
+        # num_tps = 10
+        # id_bottle_size = 128
+        # pose_bottle_size = 128
+
         input_size = 5*2 * num_tps
         self.num_tps = num_tps
 
@@ -53,7 +57,8 @@ class AVDNetwork(nn.Module):
         )
 
     def forward(self, kp_source, kp_random):
-
+        pdb.set_trace()
+        
         bs = kp_source['fg_kp'].shape[0]
         
         pose_emb = self.pose_encoder(kp_random['fg_kp'].view(bs, -1))

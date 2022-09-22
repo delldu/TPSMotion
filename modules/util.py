@@ -1,7 +1,7 @@
 from torch import nn
 import torch.nn.functional as F
 import torch
-
+import pdb
 
 class TPS:
     '''
@@ -10,6 +10,8 @@ class TPS:
     def __init__(self, mode, bs, **kwargs):
         self.bs = bs
         self.mode = mode
+        # mode = 'kp'
+        # bs = 1
         if mode == 'random':
             noise = torch.normal(mean=0, std=kwargs['sigma_affine'] * torch.ones([bs, 2, 3]))
             self.theta = noise + torch.eye(2, 3).view(1, 2, 3)
@@ -17,53 +19,58 @@ class TPS:
             self.control_points = self.control_points.unsqueeze(0)
             self.control_params = torch.normal(mean=0, 
                         std=kwargs['sigma_tps'] * torch.ones([bs, 1, kwargs['points_tps'] ** 2]))
-        elif mode == 'kp':
-            kp_1 = kwargs["kp_1"]
-            kp_2 = kwargs["kp_2"]
+        elif mode == 'kp': # True
+            kp_1 = kwargs["kp_1"] # [1, 10, 5, 2]
+            kp_2 = kwargs["kp_2"] # [1, 10, 5, 2]
             device = kp_1.device
             kp_type = kp_1.type()
-            self.gs = kp_1.shape[1]
+            self.gs = kp_1.shape[1] # 10
             n = kp_1.shape[2]
             K = torch.norm(kp_1[:,:,:, None]-kp_1[:,:, None, :], dim=4, p=2)
+            # K.size() -- [1, 10, 5, 5]
             K = K**2
             K = K * torch.log(K+1e-9)
             
             one1 = torch.ones(self.bs, kp_1.shape[1], kp_1.shape[2], 1).to(device).type(kp_type)
-            kp_1p = torch.cat([kp_1,one1], 3)
+            # one1.size() -- [1, 10, 5, 1]
+            kp_1p = torch.cat([kp_1,one1], dim=3) # kp_1.size()--[1,10,5,2] ==> [1,10,5,3]
             
             zero = torch.zeros(self.bs, kp_1.shape[1], 3, 3).to(device).type(kp_type)
-            P = torch.cat([kp_1p, zero],2)
-            L = torch.cat([K,kp_1p.permute(0,1,3,2)],2)
-            L = torch.cat([L,P],3)
+            P = torch.cat([kp_1p, zero], dim=2) # [1, 10, 8, 3]
+            L = torch.cat([K,kp_1p.permute(0,1,3,2)], dim=2)
+            L = torch.cat([L,P], dim=3) # ==> # [1, 10, 8, 8]
         
             zero = torch.zeros(self.bs, kp_1.shape[1], 3, 2).to(device).type(kp_type)
             Y = torch.cat([kp_2, zero], 2)
             one = torch.eye(L.shape[2]).expand(L.shape).to(device).type(kp_type)*0.01
-            L = L + one
+            L = L + one # # [1, 10, 8, 8]
 
             param = torch.matmul(torch.inverse(L),Y)
-            self.theta = param[:,:,n:,:].permute(0,1,3,2)
+            self.theta = param[:,:,n:,:].permute(0,1,3,2) # [1, 10, 2, 3]
 
-            self.control_points = kp_1
-            self.control_params = param[:,:,:n,:]
+            self.control_points = kp_1 # [1, 10, 5, 2]
+            self.control_params = param[:,:,:n,:] # [1, 10, 5, 2]
         else:
             raise Exception("Error TPS mode")
 
     def transform_frame(self, frame):
+        # frame.size() -- [1, 3, 64, 64]
         grid = make_coordinate_grid(frame.shape[2:], type=frame.type()).unsqueeze(0).to(frame.device)
-        grid = grid.view(1, frame.shape[2] * frame.shape[3], 2)
+        # grid.size() -- [1, 64, 64, 2]
+        grid = grid.view(1, frame.shape[2] * frame.shape[3], 2) # [1, 4096, 2]
+
         shape = [self.bs, frame.shape[2], frame.shape[3], 2]
-        if self.mode == 'kp':
+        if self.mode == 'kp': # True
             shape.insert(1, self.gs)
         grid = self.warp_coordinates(grid).view(*shape)
-        return grid
+        return grid # [1, 10, 64, 64, 2]
 
     def warp_coordinates(self, coordinates):
         theta = self.theta.type(coordinates.type()).to(coordinates.device)
         control_points = self.control_points.type(coordinates.type()).to(coordinates.device)
         control_params = self.control_params.type(coordinates.type()).to(coordinates.device)
 
-        if self.mode == 'kp':
+        if self.mode == 'kp': # True
             transformed = torch.matmul(theta[:, :, :, :2], coordinates.permute(0, 2, 1)) + theta[:, :, :, 2:]
 
             distances = coordinates.view(coordinates.shape[0], 1, 1, -1, 2) - control_points.view(self.bs, control_points.shape[1], -1, 1, 2)
@@ -89,30 +96,31 @@ class TPS:
         else:
             raise Exception("Error TPS mode")
 
-        return transformed
+        return transformed # [1, 10, 4096, 2]
         
 
 def kp2gaussian(kp, spatial_size, kp_variance):
     """
     Transform a keypoint into gaussian like representation
     """
+    # kp.size() -- [1, 50, 2]
+    # spatial_size = torch.Size([64, 64])
+    # kp_variance = 0.01
 
-    coordinate_grid = make_coordinate_grid(spatial_size, kp.type()).to(kp.device)
-    number_of_leading_dimensions = len(kp.shape) - 1
+    coordinate_grid = make_coordinate_grid(spatial_size, kp.type()).to(kp.device) # [64, 64, 2]
+    number_of_leading_dimensions = len(kp.shape) - 1 # 2
     shape = (1,) * number_of_leading_dimensions + coordinate_grid.shape
     coordinate_grid = coordinate_grid.view(*shape)
     repeats = kp.shape[:number_of_leading_dimensions] + (1, 1, 1)
-    coordinate_grid = coordinate_grid.repeat(*repeats)
+    coordinate_grid = coordinate_grid.repeat(*repeats) # [1, 50, 64, 64, 2]
 
     # Preprocess kp shape
     shape = kp.shape[:number_of_leading_dimensions] + (1, 1, 2)
     kp = kp.view(*shape)
-
     mean_sub = (coordinate_grid - kp)
-
     out = torch.exp(-0.5 * (mean_sub ** 2).sum(-1) / kp_variance)
 
-    return out
+    return out # [1, 50, 64, 64]
 
 
 def make_coordinate_grid(spatial_size, type):
