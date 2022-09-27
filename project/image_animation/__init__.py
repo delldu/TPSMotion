@@ -39,9 +39,11 @@ def get_model():
     model = model.to(device)
     model.eval()
 
+    print(f"Running on {device} ...")
+    model = torch.jit.script(model)
+
     todos.data.mkdir("output")
     if not os.path.exists("output/image_animation.torch"):
-        model = torch.jit.script(model)
         model.save("output/image_animation.torch")
 
     return model, device
@@ -52,8 +54,12 @@ def model_forward(model, device, source_tensor, driving_tensor, first_driving_te
     driving_tensor = driving_tensor.to(device)
     first_driving_tensor = first_driving_tensor.to(device)
 
-    with torch.no_grad():
-        output_tensor = model(source_tensor, driving_tensor, first_driving_tensor)
+    torch.cuda.synchronize()
+    with torch.jit.optimized_execution(False):
+        with torch.no_grad():
+            output_tensor = model(source_tensor, driving_tensor, first_driving_tensor)
+    torch.cuda.synchronize()
+
     return output_tensor
 
 
