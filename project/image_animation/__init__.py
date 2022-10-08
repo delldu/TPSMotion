@@ -63,9 +63,7 @@ def model_forward(model, device, source_tensor, driving_tensor, first_driving_te
     return output_tensor
 
 
-def video_service(input_file, output_file, targ):
-    face_file = redos.taskarg_search(targ, "face_file")
-
+def video_predict(input_file, face_file, output_file):
     # load video
     video = redos.video.Reader(input_file)
     if video.n_frames < 1:
@@ -115,22 +113,8 @@ def video_service(input_file, output_file, targ):
     for i in range(video.n_frames):
         temp_output_file = "{}/{:06d}.png".format(output_dir, i)
         os.remove(temp_output_file)
+    os.removedirs(output_dir)
+
+    todos.model.reset_device()
 
     return True
-
-
-def video_client(name, input_file, face_file, output_file):
-    cmd = redos.video.Command()
-    context = cmd.face(input_file, face_file, output_file)
-    redo = redos.Redos(name)
-    redo.set_queue_task(context)
-    print(f"Created 1 video tasks for {name}.")
-
-
-def video_server(name, HOST="localhost", port=6379):
-    return redos.video.service(name, "video_face", video_service, HOST, port)
-
-
-def video_predict(input_file, face_file, output_file):
-    targ = redos.taskarg_parse(f"video_face(input_file={input_file},face_file={face_file},output_file={output_file})")
-    video_service(input_file, output_file, targ)
