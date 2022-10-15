@@ -31,7 +31,7 @@ MGIF_IMAGE_SIZE = 256
 def get_face_model():
     """Create model."""
 
-    model_path = "models/image_face_motion.pth"
+    model_path = "models/video_drive_face.pth"
     cdir = os.path.dirname(__file__)
     checkpoint = model_path if cdir == "" else cdir + "/" + model_path
 
@@ -45,8 +45,8 @@ def get_face_model():
     model = torch.jit.script(model)
 
     todos.data.mkdir("output")
-    if not os.path.exists("output/image_face_motion.torch"):
-        model.save("output/image_face_motion.torch")
+    if not os.path.exists("output/video_drive_face.torch"):
+        model.save("output/video_drive_face.torch")
 
     return model, device
 
@@ -61,7 +61,7 @@ def model_forward(model, device, face_tensor, driving_tensor):
     return output_tensor
 
 
-def face_video_predict(face_file, video_file, output_file):
+def face_motion_predict(face_file, video_file, output_file):
     # load video
     video = redos.video.Reader(video_file)
     if video.n_frames < 1:
