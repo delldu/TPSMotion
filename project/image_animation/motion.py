@@ -304,7 +304,7 @@ class AntiAliasInterpolation2d(nn.Module):
         # The gaussian kernel is the product of the
         # gaussian function of each dimension.
         kernel = 1
-        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size])
+        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size], indexing='ij')
         for size, std, mgrid in zip(kernel_size, sigma, meshgrids):
             mean = (size - 1) / 2
             kernel *= torch.exp(-((mgrid - mean) ** 2) / (2 * std ** 2))
@@ -337,7 +337,8 @@ class KPDetector(nn.Module):
     def __init__(self, num_tps=10):
         super(KPDetector, self).__init__()
         self.num_tps = num_tps  # K -- 10
-        self.fg_encoder = models.resnet18(pretrained=False)
+        # self.fg_encoder = models.resnet18(pretrained=False)
+        self.fg_encoder = models.resnet18(weights=None)
         num_features = self.fg_encoder.fc.in_features  # 512
         self.fg_encoder.fc = nn.Linear(num_features, num_tps * 5 * 2)  # (512, 100)
 
@@ -573,7 +574,10 @@ class ImageAnimation(nn.Module):
         # self.densemotion.load_state_dict(checkpoint['dense_motion_network'])
         # torch.save(self.state_dict(), "/tmp/image_animation.pth")
 
-    def forward(self, source, driving, first_driving):
+    def forward(self, source, input_tensor):
+        first_driving = input_tensor[:, 0:3, :, :]
+        driving = input_tensor[:, 3:6, :, :]
+
         kp_source = self.kpdetector(source)
         kp_driving = self.kpdetector(driving)
         kp_first_driving = self.kpdetector(first_driving)

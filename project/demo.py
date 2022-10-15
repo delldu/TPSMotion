@@ -12,7 +12,5 @@
 import image_animation
 
 if __name__ == "__main__":
-    image_animation.video_predict("videos/0006.mp4", "images/0001.png", "output/image_animation.mp4")
-    # image_animation.video_client("PAI", "videos/2.mp4", "images/feynman.jpeg", "output/face_server.mp4")
-    # image_animation.video_server("PAI")
-
+    image_animation.face_video_predict("images/0001.png", "videos/0006.mp4", "output/face_motion.mp4")
+    # image_animation.body_video_predict(...)

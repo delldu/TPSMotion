@@ -23,13 +23,15 @@ from . import motion
 
 import pdb
 
-IMAGE_SIZE = 256
+FACE_IMAGE_SIZE = 256
+BODY_IMAGE_SIZE = 512
+MGIF_IMAGE_SIZE = 256
 
 
-def get_model():
+def get_face_model():
     """Create model."""
 
-    model_path = "models/image_animation.pth"
+    model_path = "models/image_face_motion.pth"
     cdir = os.path.dirname(__file__)
     checkpoint = model_path if cdir == "" else cdir + "/" + model_path
 
@@ -43,47 +45,43 @@ def get_model():
     model = torch.jit.script(model)
 
     todos.data.mkdir("output")
-    if not os.path.exists("output/image_animation.torch"):
-        model.save("output/image_animation.torch")
+    if not os.path.exists("output/image_face_motion.torch"):
+        model.save("output/image_face_motion.torch")
 
     return model, device
 
 
-def model_forward(model, device, source_tensor, driving_tensor, first_driving_tensor):
-    source_tensor = source_tensor.to(device)
+def model_forward(model, device, face_tensor, driving_tensor):
+    face_tensor = face_tensor.to(device)
     driving_tensor = driving_tensor.to(device)
-    first_driving_tensor = first_driving_tensor.to(device)
 
-    torch.cuda.synchronize()
-    with torch.jit.optimized_execution(False):
-        with torch.no_grad():
-            output_tensor = model(source_tensor, driving_tensor, first_driving_tensor)
-    torch.cuda.synchronize()
+    with torch.no_grad():
+        output_tensor = todos.model.two_forward(model, device, face_tensor, driving_tensor)
 
     return output_tensor
 
 
-def video_predict(input_file, face_file, output_file):
+def face_video_predict(face_file, video_file, output_file):
     # load video
-    video = redos.video.Reader(input_file)
+    video = redos.video.Reader(video_file)
     if video.n_frames < 1:
-        print(f"Read video {input_file} error.")
+        print(f"Read video {video_file} error.")
         return False
 
     # load face image
-    source_image = Image.open(face_file).convert("RGB").resize((IMAGE_SIZE, IMAGE_SIZE))
-    source_tensor = transforms.ToTensor()(source_image).unsqueeze(0)
+    face_image = Image.open(face_file).convert("RGB").resize((FACE_IMAGE_SIZE, FACE_IMAGE_SIZE))
+    face_tensor = transforms.ToTensor()(face_image).unsqueeze(0)
 
     # Create directory to store result
     output_dir = output_file[0 : output_file.rfind(".")]
     todos.data.mkdir(output_dir)
 
     # load model
-    model, device = get_model()
+    model, device = get_face_model()
 
-    print(f"{input_file} driving {face_file}, save to {output_file} ...")
+    print(f"{video_file} driving {face_file}, save to {output_file} ...")
     progress_bar = tqdm(total=video.n_frames)
-    first_driving_tensor = torch.zeros(1, 3, IMAGE_SIZE, IMAGE_SIZE)
+    first_driving_tensor = torch.zeros(1, 3, FACE_IMAGE_SIZE, FACE_IMAGE_SIZE)
 
     def clean_video_frame(no, data):
         global first_driving_tensor
@@ -95,12 +93,13 @@ def video_predict(input_file, face_file, output_file):
 
         # convert tensor from 1x4xHxW to 1x3xHxW
         driving_tensor = driving_tensor[:, 0:3, :, :]
-        driving_tensor = todos.data.resize_tensor(driving_tensor, IMAGE_SIZE, IMAGE_SIZE)
+        driving_tensor = todos.data.resize_tensor(driving_tensor, FACE_IMAGE_SIZE, FACE_IMAGE_SIZE)
 
         if no == 0:
             first_driving_tensor = driving_tensor
 
-        output_tensor = model_forward(model, device, source_tensor, driving_tensor, first_driving_tensor)
+        driving_tensor = torch.cat((first_driving_tensor, driving_tensor), dim = 1)
+        output_tensor = model_forward(model, device, face_tensor, driving_tensor)
 
         temp_output_file = "{}/{:06d}.png".format(output_dir, no)
         todos.data.save_tensor(output_tensor, temp_output_file)
