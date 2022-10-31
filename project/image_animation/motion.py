@@ -304,7 +304,8 @@ class AntiAliasInterpolation2d(nn.Module):
         # The gaussian kernel is the product of the
         # gaussian function of each dimension.
         kernel = 1
-        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size], indexing='ij')
+        # meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size], indexing="ij")
+        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size])
         for size, std, mgrid in zip(kernel_size, sigma, meshgrids):
             mean = (size - 1) / 2
             kernel *= torch.exp(-((mgrid - mean) ** 2) / (2 * std ** 2))
@@ -337,8 +338,8 @@ class KPDetector(nn.Module):
     def __init__(self, num_tps=10):
         super(KPDetector, self).__init__()
         self.num_tps = num_tps  # K -- 10
-        # self.fg_encoder = models.resnet18(pretrained=False)
-        self.fg_encoder = models.resnet18(weights=None)
+        self.fg_encoder = models.resnet18(pretrained=False)
+        # self.fg_encoder = models.resnet18(weights=None)
         num_features = self.fg_encoder.fc.in_features  # 512
         self.fg_encoder.fc = nn.Linear(num_features, num_tps * 5 * 2)  # (512, 100)
 
@@ -396,10 +397,10 @@ class DenseMotionNetwork(nn.Module):
 
         self.num_tps = num_tps
 
-    def create_heatmap(self, source_image, kp_driving, kp_source):
+    def create_heatmap(self, source_image, kp_driving, kp_face_tensor):
         B, C, H, W = source_image.shape
         gaussian_driving = kp2gaussian(kp_driving, H, W)
-        gaussian_source = kp2gaussian(kp_source, H, W)
+        gaussian_source = kp2gaussian(kp_face_tensor, H, W)
         heatmap = gaussian_driving - gaussian_source
 
         zeros = torch.zeros(heatmap.shape[0], 1, H, W).to(heatmap.device)
@@ -407,16 +408,16 @@ class DenseMotionNetwork(nn.Module):
 
         return heatmap
 
-    def create_transformations(self, source_image, kp_driving, kp_source):
+    def create_transformations(self, source_image, kp_driving, kp_face_tensor):
         # K TPS transformaions
         B, C, H, W = source_image.shape
 
         kp_driving = kp_driving.view(B, -1, 5, 2)
-        kp_source = kp_source.view(B, -1, 5, 2)
-        trans = TPS(B, kp_driving, kp_source)
+        kp_face_tensor = kp_face_tensor.view(B, -1, 5, 2)
+        trans = TPS(B, kp_driving, kp_face_tensor)
         driving_to_source = trans.transform_frame(source_image)
 
-        identity_grid = make_coordinate_grid(H, W).to(kp_source.device)
+        identity_grid = make_coordinate_grid(H, W).to(kp_face_tensor.device)
         identity_grid = identity_grid.view(1, 1, H, W, 2)
         identity_grid = identity_grid.repeat(B, 1, 1, 1, 1)
 
@@ -436,12 +437,12 @@ class DenseMotionNetwork(nn.Module):
         deformed_source = F.grid_sample(source_repeat, transformations, align_corners=True)
         return deformed_source.view(B, self.num_tps + 1, -1, H, W)  # # [1, 11, 3, 64, 64]
 
-    def forward(self, source_image, kp_driving, kp_source) -> List[torch.Tensor]:
+    def forward(self, source_image, kp_driving, kp_face_tensor) -> List[torch.Tensor]:
         source_image = self.down(source_image)
         B, C, H, W = source_image.shape
 
-        heatmap = self.create_heatmap(source_image, kp_driving, kp_source)
-        transformations = self.create_transformations(source_image, kp_driving, kp_source)
+        heatmap = self.create_heatmap(source_image, kp_driving, kp_face_tensor)
+        transformations = self.create_transformations(source_image, kp_driving, kp_face_tensor)
         deformed_source = self.create_deformed_source(source_image, transformations)
         deformed_source = deformed_source.view(B, -1, H, W)
         input = torch.cat([heatmap, deformed_source], dim=1).view(B, -1, H, W)
@@ -574,15 +575,15 @@ class ImageAnimation(nn.Module):
         # self.densemotion.load_state_dict(checkpoint['dense_motion_network'])
         # torch.save(self.state_dict(), "/tmp/image_animation.pth")
 
-    def forward(self, source, input_tensor):
-        first_driving = input_tensor[:, 0:3, :, :]
-        driving = input_tensor[:, 3:6, :, :]
+    def forward(self, drive_tensor, face_tensor):
+        first_driving = drive_tensor[:, 0:3, :, :]
+        driving = drive_tensor[:, 3:6, :, :]
 
-        kp_source = self.kpdetector(source)
+        kp_face_tensor = self.kpdetector(face_tensor)
         kp_driving = self.kpdetector(driving)
         kp_first_driving = self.kpdetector(first_driving)
-        kp_source_normal = kp_source + kp_driving - kp_first_driving
+        kp_source_normal = kp_face_tensor + kp_driving - kp_first_driving
 
-        dense_motion = self.densemotion(source, kp_source_normal, kp_source)
-        out = self.generator(source, dense_motion)
+        dense_motion = self.densemotion(face_tensor, kp_source_normal, kp_face_tensor)
+        out = self.generator(face_tensor, dense_motion)
         return out.clamp(0.0, 1.0)

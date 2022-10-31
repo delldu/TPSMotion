@@ -51,17 +51,7 @@ def get_face_model():
     return model, device
 
 
-def model_forward(model, device, face_tensor, driving_tensor):
-    face_tensor = face_tensor.to(device)
-    driving_tensor = driving_tensor.to(device)
-
-    with torch.no_grad():
-        output_tensor = todos.model.two_forward(model, device, face_tensor, driving_tensor)
-
-    return output_tensor
-
-
-def face_motion_predict(face_file, video_file, output_file):
+def drive_face(video_file, face_file, output_file):
     # load video
     video = redos.video.Reader(video_file)
     if video.n_frames < 1:
@@ -98,11 +88,12 @@ def face_motion_predict(face_file, video_file, output_file):
         if no == 0:
             first_driving_tensor = driving_tensor
 
-        driving_tensor = torch.cat((first_driving_tensor, driving_tensor), dim = 1)
-        output_tensor = model_forward(model, device, face_tensor, driving_tensor)
+        driving_tensor = torch.cat((first_driving_tensor, driving_tensor), dim=1)
+        output_tensor = todos.model.two_forward(model, device, driving_tensor, face_tensor)
 
         temp_output_file = "{}/{:06d}.png".format(output_dir, no)
         todos.data.save_tensor(output_tensor, temp_output_file)
+
 
     video.forward(callback=clean_video_frame)
 
