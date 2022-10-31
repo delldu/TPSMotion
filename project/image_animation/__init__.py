@@ -94,7 +94,6 @@ def drive_face(video_file, face_file, output_file):
         temp_output_file = "{}/{:06d}.png".format(output_dir, no)
         todos.data.save_tensor(output_tensor, temp_output_file)
 
-
     video.forward(callback=clean_video_frame)
 
     redos.video.encode(output_dir, output_file)
