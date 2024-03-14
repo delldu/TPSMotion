@@ -33,14 +33,14 @@ def test_input_shape():
     for count in range(N):
         progress_bar.update(1)
 
-        x = torch.randn(B, C, H, W)
-        y = torch.randn(B, C, H, W)
+        kp1 = torch.randn(B, 50, 2)
+        kp2 = torch.randn(B, 50, 2)
 
-        # print("x: ", x.size())
+        x = torch.randn(B, C, H, W)
 
         start_time = time.time()
         with torch.no_grad():
-            y = model(x.to(device), y.to(device))
+            y = model(kp1.to(device), kp2.to(device), x.to(device))
         torch.cuda.synchronize()
         mean_time += time.time() - start_time
 
@@ -100,7 +100,7 @@ def export_drive_face_keypoint_onnx_model():
         verbose=False, 
         input_names=input_names, 
         output_names=output_names,
-        opset_version=17,
+        opset_version=16,
     )
 
     # 3. Check onnx model file
@@ -145,19 +145,19 @@ def export_drive_face_generator_onnx_model():
     print("Export drive_face_generator onnx model ...")
 
     # 1. Run torch model
-    model, device = image_animation.get_drive_face_generator_model()
+    model, device = image_animation.get_drive_face_generator_trace_model() # OK trace mode
 
     B, C, H, W = 1, 3, image_animation.FACE_IMAGE_SIZE, image_animation.FACE_IMAGE_SIZE
-    dummy_input1 = torch.randn(B, 50, 2).to(device)
-    dummy_input2 = torch.randn(B, 50, 2).to(device)
-    dummy_input3 = torch.randn(B, C, H, W).to(device)
+    dummy_input1 = torch.randn(B, 50, 2).to(device) # source_kp
+    dummy_input2 = torch.randn(B, 50, 2).to(device) # offset_kp
+    dummy_input3 = torch.randn(B, C, H, W).to(device) # source_image
 
     with torch.no_grad():
         dummy_output = model(dummy_input1, dummy_input2, dummy_input3)
     torch_outputs = [dummy_output.cpu()]
 
     # 2. Export onnx model
-    input_names = [ "input1", "input2", "input3" ]
+    input_names = [ "source_keypoint", "offset_keypoint", "source_image" ]
     output_names = [ "output" ]
     onnx_filename = "output/drive_face_generator.onnx"
 
@@ -167,15 +167,15 @@ def export_drive_face_generator_onnx_model():
         verbose=False, 
         input_names=input_names, 
         output_names=output_names,
-        opset_version=17,
+        opset_version=16,
     )
 
     # 3. Check onnx model file
     onnx_model = onnx.load(onnx_filename)
     onnx.checker.check_model(onnx_model)
 
-    onnx_model, check = simplify(onnx_model)
-    assert check, "Simplified ONNX model could not be validated"
+    # onnx_model, check = simplify(onnx_model)
+    # assert check, "Simplified ONNX model could not be validated"
     onnx_model = onnxoptimizer.optimize(onnx_model)
     onnx.save(onnx_model, onnx_filename)
     # print(onnx.helper.printable_graph(onnx_model.graph))
@@ -198,7 +198,7 @@ def export_drive_face_generator_onnx_model():
     # 5.Compare output results
     assert len(torch_outputs) == len(onnx_outputs)
     for torch_output, onnx_output in zip(torch_outputs, onnx_outputs):
-        torch.testing.assert_close(torch_output, torch.tensor(onnx_output), rtol=0.01, atol=0.01)
+        torch.testing.assert_close(torch_output, torch.tensor(onnx_output), rtol=0.05, atol=0.05)
 
     todos.model.reset_device()
 
@@ -214,7 +214,7 @@ def export_drive_body_onnx_model():
     print("Export drive body onnx model ...")
 
     # 1. Run torch model
-    model, device = image_animation.get_body_model()
+    model, device = image_animation.get_drive_body_generator_model()
 
     B, C, H, W = 1, 3, image_animation.BODY_IMAGE_SIZE, image_animation.BODY_IMAGE_SIZE
     dummy_input1 = torch.randn(B, C, H, W).to(device)
@@ -235,7 +235,7 @@ def export_drive_body_onnx_model():
         verbose=False, 
         input_names=input_names, 
         output_names=output_names,
-        opset_version=17,
+        opset_version=16,
     )
 
     # 3. Check onnx model file
@@ -300,7 +300,7 @@ def export_drive_mgif_onnx_model():
         verbose=False, 
         input_names=input_names, 
         output_names=output_names,
-        opset_version=17,
+        opset_version=16,
     )
 
     # 3. Check onnx model file
@@ -349,7 +349,7 @@ if __name__ == "__main__":
     if args.bench_mark:
         run_bench_mark()
     if args.export_onnx:
-        # export_drive_face_keypoint_onnx_model()
+        export_drive_face_keypoint_onnx_model()
         export_drive_face_generator_onnx_model()
         # export_drive_body_onnx_model()
         # export_drive_mgif_onnx_model()

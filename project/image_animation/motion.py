@@ -31,150 +31,62 @@ class MatrixInverse(Function):
 
     @staticmethod
     def symbolic(g: torch.Graph, matrix: torch.Value) -> torch.Value:
-        return g.op("com.microsoft::Inverse", matrix)
+        return g.op("com.microsoft::Inverse", matrix).setType(matrix.type())
 matrix_inverse = MatrixInverse.apply
 
 
-# The following comes from mmcv/ops/point_sample.py
-def grid_sample(im, grid):
-    """Given an input and a flow-field grid, computes the output using input
-    values and pixel locations from grid. 
-    Args:
-        im (torch.Tensor): Input feature map, shape (N, C, H, W)
-        grid (torch.Tensor): Point coordinates, shape (N, Hg, Wg, 2)
-    Returns:
-        torch.Tensor: A tensor with sampled points, shape (N, C, Hg, Wg)
-    """
-    n, c, h, w = im.size()
-    gn, gh, gw, _ = grid.size()
-    assert n == gn
+def tps_transform_grid(bs: int, target_kp, source_kp, frame):
+    # frame.size() -- [1, 3, 64, 64]
+    B, C, H, W = frame.size()
+    grid = make_grid(H, W).unsqueeze(0).to(frame.device) # size() -- [1, 64, 64, 2]
+    grid = grid.view(1, H * W, 2)  # [1, 4096, 2]
 
-    x = grid[:, :, :, 0]
-    y = grid[:, :, :, 1]
+    # target_kp.size() -- [1, 10, 5, 2]
+    gs = target_kp.shape[1]  # 10
+    N = target_kp.shape[2] # ===> 5
 
-    # if align_corners:
-    #     x = ((x + 1) / 2) * (w - 1)
-    #     y = ((y + 1) / 2) * (h - 1)
-    # else:
-    #     x = ((x + 1) * w - 1) / 2
-    #     y = ((y + 1) * h - 1) / 2
-    x = ((x + 1) / 2) * (w - 1)
-    y = ((y + 1) / 2) * (h - 1)
+    # Eq. (1), U(r) is a radial basis function, which represents the influence of each 
+    # keypoint on the pixel at p
+    # target_kp[:, :, :, None].size() -- [1, 10, 5, 1, 2]
+    # target_kp[:, :, None, :].size() -- [1, 10, 1, 5, 2]
+    K = torch.norm(target_kp[:, :, :, None] - target_kp[:, :, None, :], dim=4, p=2)
+    # K.size() -- [1, 10, 5, 5]
+    K = K**2
+    K = K * torch.log(K + 1e-9)
 
-    x = x.view(n, -1)
-    y = y.view(n, -1)
+    one = torch.ones(bs, gs, N, 1).to(target_kp.device) # size() -- [1, 10, 5, 1]
+    target_kp_one = torch.cat([target_kp, one], dim=3)  # target_kp.size()--[1,10,5,2] ==> [1,10,5,3], xy-> xyz
+    zero = torch.zeros(bs, gs, 3, 3).to(target_kp.device) # size() -- [1, 10, 3, 3]
+    P = torch.cat([target_kp_one, zero], dim=2)  # [1, 10, 8, 3]
+    L = torch.cat([K, target_kp_one.permute(0, 1, 3, 2)], dim=2)
+    L = torch.cat([L, P], dim=3)  # ==> # [1, 10, 8, 8]
 
-    x0 = torch.floor(x).long()
-    y0 = torch.floor(y).long()
-    x1 = x0 + 1
-    y1 = y0 + 1
+    zero = torch.zeros(bs, gs, 3, 2).to(target_kp.device) # [1, 10, 3, 2]
+    Y = torch.cat([source_kp, zero], dim=2) # size() -- [1, 10, 8, 2]
+    one = torch.eye(L.shape[2]).expand(L.shape).to(L.device)
+    L = L + one * 0.01  # [1, 10, 8, 8]
+    # param = torch.matmul(torch.inverse(L), Y) # size() -- [1, 10, 8, 2]
+    param = torch.matmul(matrix_inverse(L), Y) # size() -- [1, 10, 8, 2]
 
-    wa = ((x1 - x) * (y1 - y)).unsqueeze(1)
-    wb = ((x1 - x) * (y - y0)).unsqueeze(1)
-    wc = ((x - x0) * (y1 - y)).unsqueeze(1)
-    wd = ((x - x0) * (y - y0)).unsqueeze(1)
+    theta = param[:, :, N:, :].permute(0, 1, 3, 2)  # [1, 10, 2, 3]
+    control_points = target_kp  # [1, 10, 5, 2]
+    control_params = param[:, :, :N, :]  # [1, 10, 5, 2]
 
-    # Apply default for grid_sample function zero padding
-    im_padded = F.pad(im, pad=[1, 1, 1, 1], mode='constant', value=0.0)
-    padded_h = h + 2
-    padded_w = w + 2
-    # save points positions after padding
-    x0, x1, y0, y1 = x0 + 1, x1 + 1, y0 + 1, y1 + 1
+    transformed = torch.matmul(theta[:, :, :, :2], grid.permute(0, 2, 1)) + theta[:, :, :, 2:]
+    distances = (
+        grid.view(grid.shape[0], 1, 1, -1, 2)
+        - control_points.view(bs, control_points.shape[1], -1, 1, 2)
+    )
 
-    # Clip coordinates to padded image size
-    x0 = torch.where(x0 < 0, torch.tensor(0), x0)
-    x0 = torch.where(x0 > padded_w - 1, torch.tensor(padded_w - 1), x0)
-    x1 = torch.where(x1 < 0, torch.tensor(0), x1)
-    x1 = torch.where(x1 > padded_w - 1, torch.tensor(padded_w - 1), x1)
-    y0 = torch.where(y0 < 0, torch.tensor(0), y0)
-    y0 = torch.where(y0 > padded_h - 1, torch.tensor(padded_h - 1), y0)
-    y1 = torch.where(y1 < 0, torch.tensor(0), y1)
-    y1 = torch.where(y1 > padded_h - 1, torch.tensor(padded_h - 1), y1)
+    distances = distances**2 # size() -- [1, 10, 5, 4096, 2]
+    # result = distances.sum(-1)
+    result = distances.sum(dim=4)
+    result = result * torch.log(result + 1e-9)
 
-    im_padded = im_padded.view(n, c, -1)
+    result = torch.matmul(result.permute(0, 1, 3, 2), control_params)
+    transformed = transformed.permute(0, 1, 3, 2) + result
 
-    x0_y0 = (x0 + y0 * padded_w).unsqueeze(1).expand(-1, c, -1)
-    x0_y1 = (x0 + y1 * padded_w).unsqueeze(1).expand(-1, c, -1)
-    x1_y0 = (x1 + y0 * padded_w).unsqueeze(1).expand(-1, c, -1)
-    x1_y1 = (x1 + y1 * padded_w).unsqueeze(1).expand(-1, c, -1)
-
-    Ia = torch.gather(im_padded, 2, x0_y0)
-    Ib = torch.gather(im_padded, 2, x0_y1)
-    Ic = torch.gather(im_padded, 2, x1_y0)
-    Id = torch.gather(im_padded, 2, x1_y1)
-
-    return (Ia * wa + Ib * wb + Ic * wc + Id * wd).reshape(n, c, gh, gw)
-
-
-class TPS:
-    """TPS transformation for Eq(2) in the paper"""
-    def __init__(self, bs: int, driving_kp, source_kp):
-        # driving_kp.size() -- [1, 10, 5, 2]
-        # source_kp.size() -- [1, 10, 5, 2]
-
-        self.bs = bs  # 1
-        self.gs = driving_kp.shape[1]  # 10
-        N = driving_kp.shape[2]
-
-        # Eq. (1), U(r) is a radial basis function, which represents the influence of each 
-        # keypoint on the pixel at p
-        # driving_kp[:, :, :, None].size() -- [1, 10, 5, 1, 2]
-        # driving_kp[:, :, None, :].size() -- [1, 10, 1, 5, 2]
-        K = torch.norm(driving_kp[:, :, :, None] - driving_kp[:, :, None, :], dim=4, p=2)
-        # K.size() -- [1, 10, 5, 5]
-        K = K**2
-        K = K * torch.log(K + 1e-9)
-
-        one = torch.ones(self.bs, self.gs, N, 1).to(driving_kp.device) # size() -- [1, 10, 5, 1]
-        driving_kp_one = torch.cat([driving_kp, one], dim=3)  # driving_kp.size()--[1,10,5,2] ==> [1,10,5,3], xy-> xyz
-
-        zero = torch.zeros(self.bs, self.gs, 3, 3).to(driving_kp.device) # size() -- [1, 10, 3, 3]
-        P = torch.cat([driving_kp_one, zero], dim=2)  # [1, 10, 8, 3]
-        L = torch.cat([K, driving_kp_one.permute(0, 1, 3, 2)], dim=2)
-        L = torch.cat([L, P], dim=3)  # ==> # [1, 10, 8, 8]
-
-        zero = torch.zeros(self.bs, self.gs, 3, 2).to(driving_kp.device) # [1, 10, 3, 2]
-        Y = torch.cat([source_kp, zero], dim=2) # size() -- [1, 10, 8, 2]
-        one = torch.eye(L.shape[2]).expand(L.shape).to(L.device)
-        L = L + one * 0.01  # [1, 10, 8, 8]
-        # param = torch.matmul(torch.inverse(L), Y) # size() -- [1, 10, 8, 2]
-        param = torch.matmul(matrix_inverse(L), Y) # size() -- [1, 10, 8, 2]
-
-        self.theta = param[:, :, N:, :].permute(0, 1, 3, 2)  # [1, 10, 2, 3]
-
-        self.control_points = driving_kp  # [1, 10, 5, 2]
-        self.control_params = param[:, :, :N, :]  # [1, 10, 5, 2]
-
-    def warp_grid(self, grid):
-        # grid.size() -- [1, 10, 64, 64, 2]
-        theta = self.theta.to(grid.device)
-        control_points = self.control_points.to(grid.device)
-        control_params = self.control_params.to(grid.device)
-
-        transformed = torch.matmul(theta[:, :, :, :2], grid.permute(0, 2, 1)) + theta[:, :, :, 2:]
-        distances = (
-            grid.view(grid.shape[0], 1, 1, -1, 2)
-            - control_points.view(self.bs, control_points.shape[1], -1, 1, 2)
-        )
-
-        distances = distances**2
-        result = distances.sum(-1)
-        result = result * torch.log(result + 1e-9)
-
-        result = torch.matmul(result.permute(0, 1, 3, 2), control_params)
-        transformed = transformed.permute(0, 1, 3, 2) + result
-
-        return transformed  # [1, 10, 4096, 2]
-
-    def transform_grid(self, frame):
-        # frame.size() -- [1, 3, 64, 64]
-        B, C, H, W = frame.size()
-        grid = make_grid(H, W).unsqueeze(0).to(frame.device) # size() -- [1, 64, 64, 2]
-        grid = grid.view(1, H * W, 2)  # [1, 4096, 2]
-
-        # shape = [self.bs, self.gs, H, W, 2]
-        grid = self.warp_grid(grid).view(self.bs, self.gs, H, W, 2)
-        return grid  # [1, 10, 64, 64, 2]
+    return transformed.view(bs, gs, H, W, 2)  # [1, 10, 64, 64, 2]
 
 
 def keypoint2gaussian(kp, H: int, W: int):
@@ -196,7 +108,7 @@ def keypoint2gaussian(kp, H: int, W: int):
 
 def make_grid(H: int, W: int):
     """Create a meshgrid [-1,1] x [-1,1] of given (H, W). """
-    # H = 64, W = 64
+    # H === 64, W === 64
     x = torch.arange(W)
     y = torch.arange(H)
 
@@ -313,7 +225,11 @@ class HourglassEncoder(nn.Module):
     def forward(self, x) -> List[torch.Tensor]:
         outs = [x]
         for down_block in self.down_blocks:
-            outs.append(down_block(outs[-1]))
+            # outs.append(down_block(outs[-1]))
+            n_x = down_block(x)
+            outs.append(n_x)
+            x = n_x
+
         return outs
 
 
@@ -432,29 +348,9 @@ class KeyPointDetector(nn.Module):
         num_features = self.fg_encoder.fc.in_features  # 512
         self.fg_encoder.fc = nn.Linear(num_features, num_tps * 5 * 2)  # (512, 100)
 
-        # first_kp for relative keypoints detection
-        # self.register_buffer("first_kp", torch.zeros(1, self.num_tps * 5, 2))
         self.load_weights(model_path = model_path)
 
     def forward(self, image):
-        return self.detect_source(image)
-
-    # def detect_drive(self, image):
-    #     # image.size() -- [1, 3, 256, 256]
-    #     B, C, H, W = image.size()
-    #     output_kp = self.detect_source(image)
-
-    #     # relative keypoints case
-    #     if self.first_kp.abs().max() < 1e-5:
-    #         # ==> pdb.set_trace()
-    #         print(f"Updating first key points ...")
-    #         self.first_kp = output_kp[0:1, :, :]
-
-    #     offset = output_kp - self.first_kp.repeat(B, 1, 1)
-
-    #     return offset.tanh()/2.0
-
-    def detect_source(self, image):
         # image.size() -- [1, 3, 256, 256]
         B, C, H, W = image.size()
         fg_kp = self.fg_encoder(image)  # size() -- [1, 100]
@@ -473,7 +369,7 @@ class KeyPointDetector(nn.Module):
 
 class DenseMotionNetwork(nn.Module):
     """
-    Module that estimating an optical flow and multi-resolution occlusion masks
+    Estimating an optical flow and multi-resolution occlusion masks
            from K TPS trans_grid and an affine transformation.
     """
     def __init__(self,
@@ -521,9 +417,9 @@ class DenseMotionNetwork(nn.Module):
         self.num_tps = num_tps
 
 
-    def create_heatmap(self, source_image, driving_kp, source_kp):
+    def create_heatmap(self, source_image, target_kp, source_kp):
         B, C, H, W = source_image.size()
-        gaussian_driving = keypoint2gaussian(driving_kp, H, W)
+        gaussian_driving = keypoint2gaussian(target_kp, H, W)
         gaussian_source = keypoint2gaussian(source_kp, H, W)
         heatmap = gaussian_driving - gaussian_source
 
@@ -532,15 +428,14 @@ class DenseMotionNetwork(nn.Module):
 
         return heatmap
 
-    def create_trans_grid(self, source_image, driving_kp, source_kp):
+    def create_trans_grid(self, source_image, target_kp, source_kp):
         # K TPS transformaions
         B, C, H, W = source_image.size()
 
-        driving_kp = driving_kp.view(B, -1, 5, 2)
+        target_kp = target_kp.view(B, -1, 5, 2)
         source_kp = source_kp.view(B, -1, 5, 2)
 
-        tps = TPS(B, driving_kp, source_kp)
-        kp_grid = tps.transform_grid(source_image)
+        kp_grid = tps_transform_grid(B, target_kp, source_kp, source_image)
 
         id_grid = make_grid(H, W).to(source_kp.device) # for Background ?
         id_grid = id_grid.view(1, 1, H, W, 2)
@@ -560,21 +455,20 @@ class DenseMotionNetwork(nn.Module):
         # self.num_tps + 1 -- include backgroud information ?
 
         trans_grid = trans_grid.view((B * (self.num_tps + 1), H, W, -1)) # size() -- [11, 64, 64, 2])
-        # onnx support
-        # deformed_source = F.grid_sample(source_repeat, trans_grid, align_corners=True)
-        deformed_source = grid_sample(source_repeat, trans_grid)
+        # onnx support since optset_version=16
+        deformed_source = F.grid_sample(source_repeat, trans_grid, align_corners=True)
 
         return deformed_source.view(B, self.num_tps + 1, -1, H, W)  # [1, 11, 3, 64, 64]
 
-    def forward(self, source_image, driving_kp, source_kp) -> List[torch.Tensor]:
+    def forward(self, source_image, target_kp, source_kp) -> List[torch.Tensor]:
         source_image = self.down(source_image) # AntiAliasInterpolation2d: size from 256x256 to 64x64
 
         B, C, H, W = source_image.size()
         # tensor [source_image] size: [1, 3, 64, 64], min: 0.004092, max: 0.998304, mean: 0.623311
-        heatmap = self.create_heatmap(source_image, driving_kp, source_kp)
+        heatmap = self.create_heatmap(source_image, target_kp, source_kp)
         # tensor [heatmap] size: [1, 51, 64, 64], min: -0.0, max: 0.0, mean: -0.0
 
-        trans_grid = self.create_trans_grid(source_image, driving_kp, source_kp)
+        trans_grid = self.create_trans_grid(source_image, target_kp, source_kp)
         # tensor [trans_grid] size: [1, 11, 64, 64, 2], min: -1.049396, max: 1.052836, mean: 0.000667
 
         deformed_source = self.create_deformed_source(source_image, trans_grid)
@@ -592,7 +486,8 @@ class DenseMotionNetwork(nn.Module):
         #     tensor [item] size: [1, 256, 32, 32], min: 0.0, max: 5.743032, mean: 0.240297
         #     tensor [item] size: [1, 148, 64, 64], min: -0.0, max: 4.772509, mean: 0.218149
 
-        contribution_maps = self.maps(hourglass_output[-1])
+        # contribution_maps = self.maps(hourglass_output[-1])
+        contribution_maps = self.maps(hourglass_output[4])
         contribution_maps = F.softmax(contribution_maps, dim=1)
         # tensor [contribution_maps] size: [1, 11, 64, 64], min: 0.0, max: 0.999957, mean: 0.090909
 
@@ -606,7 +501,6 @@ class DenseMotionNetwork(nn.Module):
         ################################################################
         dense_motion_output = [optical_flow]  # !!! Optical Flow !!!
         ################################################################
-
         # torch.jit.script not happy
         # for i in range(self.occlusion_num-self.up_nums):
         #     dense_motion_output.append(torch.sigmoid(self.occlusion[i](hourglass_output[self.up_nums-self.occlusion_num+i])))
@@ -616,12 +510,14 @@ class DenseMotionNetwork(nn.Module):
         #     dense_motion_output.append(torch.sigmoid(self.occlusion[i+self.occlusion_num-self.up_nums](hourglass_output)))
         for i, oc_block in enumerate(self.occlusion):  # 4
             if i < self.occlusion_num - self.up_nums:  # 2
-                j = self.up_nums - self.occlusion_num + i
-                # i --> [0, 1], j --> [-2, -1]
+                # j = self.up_nums - self.occlusion_num + i
+                # i --> [0, 1], j --> [-2, -1] == [3, 4]
+                j = i + 1 + self.occlusion_num - self.up_nums
                 t = oc_block(hourglass_output[j])
                 dense_motion_output.append(torch.sigmoid(t))  # occlusion_map
 
-        hourglass_output = hourglass_output[-1]
+        # hourglass_output = hourglass_output[-1]
+        hourglass_output = hourglass_output[4]
         for i, up_block in enumerate(self.up):  # 2
             hourglass_output = up_block(hourglass_output)
             for j, oc_block in enumerate(self.occlusion):  # 4
@@ -666,20 +562,13 @@ class InpaintingNetwork(nn.Module):
 
     def optical_flow_sample(self, input, optical_flow):
         # tensor [optical_flow] size: [1, 64, 64, 2], min: -1.000137, max: 1.000593, mean: 1.4e-05
-        _, _, h, w = input.size()
-        # _, h_old, w_old, _ = optical_flow..size()
-        # if h_old != h or w_old != w:
-        #     optical_flow = optical_flow.permute(0, 3, 1, 2)
-        #     optical_flow = F.interpolate(optical_flow, size=(h, w), mode="bilinear", align_corners=True)
-        #     optical_flow = optical_flow.permute(0, 2, 3, 1)
-        # return F.grid_sample(input, optical_flow, align_corners=True)
-
+        B, C, H, W = input.size()
         grid = optical_flow.permute(0, 3, 1, 2)
-        grid = F.interpolate(grid, size=(h, w), mode="bilinear", align_corners=True)
+        grid = F.interpolate(grid, size=(H, W), mode="bilinear", align_corners=True)
         grid = grid.permute(0, 2, 3, 1)
 
-        # onnx support            
-        return grid_sample(input, grid)
+        # onnx support since optset_version=16
+        return F.grid_sample(input, grid)
 
 
     def forward(self, source_image, dense_motion: List[torch.Tensor]):
@@ -713,7 +602,14 @@ class InpaintingNetwork(nn.Module):
 
         deformed_source = self.optical_flow_sample(source_image, optical_flow)
 
-        occlusion_last = occlusion_map[-1] # 256x256
+        # occlusion_map is list: len = 4
+        #     tensor [item] size: [1, 1, 32, 32], min: 0.02401, max: 1.0, mean: 0.507328
+        #     tensor [item] size: [1, 1, 64, 64], min: 0.161658, max: 0.995876, mean: 0.764606
+        #     tensor [item] size: [1, 1, 128, 128], min: 0.014082, max: 0.999765, mean: 0.787931
+        #     tensor [item] size: [1, 1, 256, 256], min: 0.651588, max: 0.999984, mean: 0.998549
+
+        # occlusion_last = occlusion_map[-1] # 256x256
+        occlusion_last = occlusion_map[3] # 256x256
         out = out * (1.0 - occlusion_last) + encode_i
         out = torch.sigmoid(self.final(out))
         out = out * (1.0 - occlusion_last) + deformed_source * occlusion_last
@@ -724,7 +620,6 @@ class InpaintingNetwork(nn.Module):
 class ImageAnimation(nn.Module):
     def __init__(self, model_path):
         super().__init__()
-        # self.keypoint_detector = KeyPointDetector()
         self.dense_motion = DenseMotionNetwork()
         self.generator = InpaintingNetwork()
 
@@ -736,13 +631,9 @@ class ImageAnimation(nn.Module):
         cdir = os.path.dirname(__file__)
         checkpoint = model_path if cdir == "" else cdir + "/" + model_path
         sd = torch.load(checkpoint)
-
-        # sd['kp_detector']['first_kp'] = torch.zeros(1, 50, 2) # add our init paramters
         self.generator.load_state_dict(sd['inpainting_network'])
-        # self.keypoint_detector.load_state_dict(sd['kp_detector'])
         self.dense_motion.load_state_dict(sd['dense_motion_network'])
 
-    # def forward(self, drive_tensor, source_tensor):
     def forward(self, source_kp, offset_kp, source_tensor):
         # tensor [source_kp] size: [1, 50, 2], min: -0.998097, max: 0.977059, mean: -0.015133
         # tensor [offset_kp] size: [1, 50, 2], min: -0.998392, max: 0.975835, mean: 0.013823
