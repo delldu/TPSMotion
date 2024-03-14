@@ -23,6 +23,7 @@ from typing import List
 import todos
 import pdb
 
+# https://github.com/pytorch/pytorch/issues/107948
 class MatrixInverse(Function):
     @staticmethod
     def forward(ctx, matrix) -> torch.Value:
@@ -44,8 +45,8 @@ def grid_sample(im, grid):
     Returns:
         torch.Tensor: A tensor with sampled points, shape (N, C, Hg, Wg)
     """
-    n, c, h, w = im.shape
-    gn, gh, gw, _ = grid.shape
+    n, c, h, w = im.size()
+    gn, gh, gw, _ = grid.size()
     assert n == gn
 
     x = grid[:, :, :, 0]
@@ -134,11 +135,8 @@ class TPS:
 
         zero = torch.zeros(self.bs, self.gs, 3, 2).to(driving_kp.device) # [1, 10, 3, 2]
         Y = torch.cat([source_kp, zero], dim=2) # size() -- [1, 10, 8, 2]
-        one = torch.eye(L.shape[2]).expand(L.shape).to(driving_kp.device) * 0.01
-        L = L + one  # [1, 10, 8, 8]
-
-        # torch.inverse, onnx not support !!!
-        # xxxx_8888
+        one = torch.eye(L.shape[2]).expand(L.shape).to(L.device)
+        L = L + one * 0.01  # [1, 10, 8, 8]
         # param = torch.matmul(torch.inverse(L), Y) # size() -- [1, 10, 8, 2]
         param = torch.matmul(matrix_inverse(L), Y) # size() -- [1, 10, 8, 2]
 
@@ -170,7 +168,7 @@ class TPS:
 
     def transform_grid(self, frame):
         # frame.size() -- [1, 3, 64, 64]
-        B, C, H, W = frame.shape
+        B, C, H, W = frame.size()
         grid = make_grid(H, W).unsqueeze(0).to(frame.device) # size() -- [1, 64, 64, 2]
         grid = grid.view(1, H * W, 2)  # [1, 4096, 2]
 
@@ -179,11 +177,11 @@ class TPS:
         return grid  # [1, 10, 64, 64, 2]
 
 
-def kp2gaussian(kp, H: int, W: int):
+def keypoint2gaussian(kp, H: int, W: int):
     """Transform a keypoint into gaussian like representation """
     # kp.size() -- [1, 50, 2]
     # H, W = 64, 64
-    B, N, _ = kp.shape
+    B, N, _ = kp.size()
     grid = make_grid(H, W).to(kp.device)  # [64, 64, 2]
     grid = grid.view(1, 1, H, W, 2)  # [1, 1, 64, 64, 2]
     grid = grid.repeat(B, N, 1, 1, 1)  # ==> [1, 50, 64, 64, 2]
@@ -297,8 +295,7 @@ class SameBlock2d(nn.Module):
         return out
 
 
-class Encoder(nn.Module):
-    """Hourglass Encoder """
+class HourglassEncoder(nn.Module):
     def __init__(self, block_expansion=64, in_features=84, num_blocks=5, max_features=1024):
         super().__init__()
         down_blocks = []
@@ -320,8 +317,7 @@ class Encoder(nn.Module):
         return outs
 
 
-class Decoder(nn.Module):
-    """Hourglass Decoder"""
+class HourglassDecoder(nn.Module):
     def __init__(self, block_expansion=64, in_features=84, num_blocks=5, max_features=1024):
         super().__init__()
         up_blocks = []
@@ -358,8 +354,8 @@ class Hourglass(nn.Module):
         max_features=1024,
     ):
         super().__init__()
-        self.encoder = Encoder(block_expansion, in_features, num_blocks, max_features)
-        self.decoder = Decoder(block_expansion, in_features, num_blocks, max_features)
+        self.encoder = HourglassEncoder(block_expansion, in_features, num_blocks, max_features)
+        self.decoder = HourglassDecoder(block_expansion, in_features, num_blocks, max_features)
         self.out_channels = self.decoder.out_channels
 
     def forward(self, x) -> List[torch.Tensor]:
@@ -440,6 +436,28 @@ class KeyPointDetector(nn.Module):
         self.register_buffer("first_kp", torch.zeros(1, self.num_tps * 5, 2))
 
     def forward(self, image, standard:bool=True):
+        if standard:
+            return self.detect_source(image)
+        # else
+        return self.detect_drive(image)
+
+    def detect_drive(self, image):
+        # image.size() -- [1, 3, 256, 256]
+        B, C, H, W = image.size()
+        output_kp = self.detect_source(image)
+
+        # xxxx_8888
+        # relative keypoints case
+        if self.first_kp.abs().max() < 1e-5:
+            # ==> pdb.set_trace()
+            print(f"Updating first key points ...")
+            self.first_kp = output_kp[0:1, :, :]
+
+        offset = output_kp - self.first_kp.repeat(B, 1, 1)
+
+        return offset.tanh()/2.0
+
+    def detect_source(self, image):
         # image.size() -- [1, 3, 256, 256]
         B, C, H, W = image.size()
         fg_kp = self.fg_encoder(image)  # size() -- [1, 100]
@@ -447,19 +465,7 @@ class KeyPointDetector(nn.Module):
         fg_kp = fg_kp * 2.0 - 1.0  # convert element from [0.0, 1.0] to [-1, 1.0]
 
         output_kp = fg_kp.view(B, self.num_tps * 5, -1)  # [1, 50, 2]
-        if standard:
-            return output_kp
-
-        # xxxx_8888
-        # relative keypoints case
-        if self.first_kp.abs().max() < 1e-5:
-            # ==> pdb.set_trace()
-            print(f"Updating first key points ...") # ==> standard === False
-            self.first_kp = output_kp[0:1, :, :]
-
-        offset = output_kp - self.first_kp.repeat(B, 1, 1)
-
-        return offset.tanh()/2.0
+        return output_kp
 
 
 class DenseMotionNetwork(nn.Module):
@@ -478,8 +484,6 @@ class DenseMotionNetwork(nn.Module):
         super().__init__()
 
         self.down = AntiAliasInterpolation2d(num_channels, scale_factor)
-        self.scale_factor = scale_factor
-
         self.hourglass = Hourglass(
             block_expansion=block_expansion, # 64
             in_features=(num_channels * (num_tps + 1) + num_tps * 5 + 1), # why ???
@@ -515,9 +519,9 @@ class DenseMotionNetwork(nn.Module):
 
 
     def create_heatmap(self, source_image, driving_kp, source_kp):
-        B, C, H, W = source_image.shape
-        gaussian_driving = kp2gaussian(driving_kp, H, W)
-        gaussian_source = kp2gaussian(source_kp, H, W)
+        B, C, H, W = source_image.size()
+        gaussian_driving = keypoint2gaussian(driving_kp, H, W)
+        gaussian_source = keypoint2gaussian(source_kp, H, W)
         heatmap = gaussian_driving - gaussian_source
 
         zeros = torch.zeros(heatmap.shape[0], 1, H, W).to(heatmap.device)  # for Background ?
@@ -527,12 +531,11 @@ class DenseMotionNetwork(nn.Module):
 
     def create_trans_grid(self, source_image, driving_kp, source_kp):
         # K TPS transformaions
-        B, C, H, W = source_image.shape
+        B, C, H, W = source_image.size()
 
         driving_kp = driving_kp.view(B, -1, 5, 2)
         source_kp = source_kp.view(B, -1, 5, 2)
 
-        # xxxx_8888
         tps = TPS(B, driving_kp, source_kp)
         kp_grid = tps.transform_grid(source_image)
 
@@ -549,7 +552,7 @@ class DenseMotionNetwork(nn.Module):
     def create_deformed_source(self, source_image, trans_grid):
         # source_image.size() -- [1, 3, 64, 64]
         # trans_grid.size() -- [11, 64, 64, 2]
-        B, C, H, W = source_image.shape
+        B, C, H, W = source_image.size()
         source_repeat = source_image.repeat(self.num_tps + 1, 1, 1, 1) # size() -- [11, 3, 64, 64]
         # self.num_tps + 1 -- include backgroud information ?
 
@@ -563,7 +566,7 @@ class DenseMotionNetwork(nn.Module):
     def forward(self, source_image, driving_kp, source_kp) -> List[torch.Tensor]:
         source_image = self.down(source_image) # AntiAliasInterpolation2d: size from 256x256 to 64x64
 
-        B, C, H, W = source_image.shape
+        B, C, H, W = source_image.size()
         # tensor [source_image] size: [1, 3, 64, 64], min: 0.004092, max: 0.998304, mean: 0.623311
         heatmap = self.create_heatmap(source_image, driving_kp, source_kp)
         # tensor [heatmap] size: [1, 51, 64, 64], min: -0.0, max: 0.0, mean: -0.0
@@ -660,16 +663,20 @@ class InpaintingNetwork(nn.Module):
 
     def optical_flow_sample(self, input, optical_flow):
         # tensor [optical_flow] size: [1, 64, 64, 2], min: -1.000137, max: 1.000593, mean: 1.4e-05
-        _, _, h, w = input.shape
-        _, h_old, w_old, _ = optical_flow.shape
-        if h_old != h or w_old != w:
-            optical_flow = optical_flow.permute(0, 3, 1, 2)
-            optical_flow = F.interpolate(optical_flow, size=(h, w), mode="bilinear", align_corners=True)
-            optical_flow = optical_flow.permute(0, 2, 3, 1)
+        _, _, h, w = input.size()
+        # _, h_old, w_old, _ = optical_flow..size()
+        # if h_old != h or w_old != w:
+        #     optical_flow = optical_flow.permute(0, 3, 1, 2)
+        #     optical_flow = F.interpolate(optical_flow, size=(h, w), mode="bilinear", align_corners=True)
+        #     optical_flow = optical_flow.permute(0, 2, 3, 1)
+        # return F.grid_sample(input, optical_flow, align_corners=True)
+
+        grid = optical_flow.permute(0, 3, 1, 2)
+        grid = F.interpolate(grid, size=(h, w), mode="bilinear", align_corners=True)
+        grid = grid.permute(0, 2, 3, 1)
 
         # onnx support            
-        # return F.grid_sample(input, optical_flow, align_corners=True)
-        return grid_sample(input, optical_flow)
+        return grid_sample(input, grid)
 
 
     def forward(self, source_image, dense_motion: List[torch.Tensor]):
@@ -680,7 +687,6 @@ class InpaintingNetwork(nn.Module):
             encoder_map.append(out)
 
         optical_flow = dense_motion[0]
-
         occlusion_map = dense_motion[1:]
         out = self.optical_flow_sample(out, optical_flow)
         out = out * occlusion_map[0] # mask 32x32 ?
@@ -715,8 +721,8 @@ class InpaintingNetwork(nn.Module):
 class ImageAnimation(nn.Module):
     def __init__(self, model_path):
         super().__init__()
-        self.kpdetector = KeyPointDetector()
-        self.densemotion = DenseMotionNetwork()
+        self.keypoint_detector = KeyPointDetector()
+        self.dense_motion = DenseMotionNetwork()
         self.generator = InpaintingNetwork()
 
         self.load_weights(model_path=model_path)
@@ -730,21 +736,22 @@ class ImageAnimation(nn.Module):
 
         sd['kp_detector']['first_kp'] = torch.zeros(1, 50, 2) # add our init paramters
         self.generator.load_state_dict(sd['inpainting_network'])
-        self.kpdetector.load_state_dict(sd['kp_detector'])
-        self.densemotion.load_state_dict(sd['dense_motion_network'])
+        self.keypoint_detector.load_state_dict(sd['kp_detector'])
+        self.dense_motion.load_state_dict(sd['dense_motion_network'])
 
 
     def forward(self, drive_tensor, source_tensor):
         # tensor [source_tensor] size: [1, 3, 256, 256], min: 0.0, max: 1.0, mean: 0.629024
-        source_kp = self.kpdetector(source_tensor, standard=True)
+        source_kp = self.keypoint_detector.detect_source(source_tensor)
         # tensor [source_kp] size: [1, 50, 2], min: -0.998097, max: 0.977059, mean: -0.015133
 
-        driving_kp = self.kpdetector(drive_tensor, standard=False) # driving_kp - first_kp
+        driving_kp = self.keypoint_detector.detect_drive(drive_tensor) # driving_kp - first_kp
+        # ==> driving_kp is offset_kp !!!
         # tensor [driving_kp] size: [1, 50, 2], min: -0.998392, max: 0.975835, mean: 0.013823
-        kp_normal = source_kp + driving_kp
-        # kp_normal = driving_kp
+        target_kp = source_kp + driving_kp
+        # target_kp = driving_kp
 
-        dense_motion = self.densemotion(source_tensor, kp_normal, source_kp)
+        dense_motion = self.dense_motion(source_tensor, target_kp, source_kp)
         # dense_motion is list: len = 5
         #     tensor [item] size: [1, 64, 64, 2], min: -1.000137, max: 1.000593, mean: 1.4e-05
         #     tensor [item] size: [1, 1, 32, 32], min: 0.0082, max: 1.0, mean: 0.442793
@@ -753,4 +760,4 @@ class ImageAnimation(nn.Module):
         #     tensor [item] size: [1, 1, 256, 256], min: 0.348033, max: 0.999995, mean: 0.997214
 
         out = self.generator(source_tensor, dense_motion)
-        return out.clamp(0.0, 1.0).float()
+        return out.clamp(0.0, 1.0)

@@ -33,20 +33,20 @@ def get_face_model():
     model = motion.ImageAnimation(model_path="models/drive_face.pth")
     device = todos.model.get_device()
     model = model.to(device)
-    # model.eval()
+    model.eval()
 
     print(f"Running on {device} ...")
-    # # make sure model good for C/C++
-    # model = torch.jit.script(model)
-    # # https://github.com/pytorch/pytorch/issues/52286
-    # torch._C._jit_set_profiling_executor(False)
-    # # C++ Reference
-    # # torch::jit::getProfilingMode() = false;                                                                                                             
-    # # torch::jit::setTensorExprFuserEnabled(false);
+    # make sure model good for C/C++
+    model = torch.jit.script(model)
+    # https://github.com/pytorch/pytorch/issues/52286
+    torch._C._jit_set_profiling_executor(False)
+    # C++ Reference
+    # torch::jit::getProfilingMode() = false;                                                                                                             
+    # torch::jit::setTensorExprFuserEnabled(false);
 
-    # todos.data.mkdir("output")
-    # if not os.path.exists("output/video_drive_face.torch"):
-    #     model.save("output/video_drive_face.torch")
+    todos.data.mkdir("output")
+    if not os.path.exists("output/video_drive_face.torch"):
+        model.save("output/video_drive_face.torch")
 
     return model, device
 
@@ -175,3 +175,26 @@ def drive_body(video_file, body_file, output_file):
     todos.model.reset_device()
 
     return True
+
+def get_mgif_model():
+    """Create model."""
+
+    model = motion.ImageAnimation(model_path="models/drive_mgif.pth")
+    device = todos.model.get_device()
+    model = model.to(device)
+    model.eval()
+
+    print(f"Running on {device} ...")
+    # make sure model good for C/C++
+    model = torch.jit.script(model)
+    # https://github.com/pytorch/pytorch/issues/52286
+    torch._C._jit_set_profiling_executor(False)
+    # C++ Reference
+    # torch::jit::getProfilingMode() = false;                                                                                                             
+    # torch::jit::setTensorExprFuserEnabled(false);
+
+    todos.data.mkdir("output")
+    if not os.path.exists("output/video_drive_mgif.torch"):
+        model.save("output/video_drive_face.torch")
+
+    return model, device
