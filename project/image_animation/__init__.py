@@ -27,7 +27,31 @@ FACE_IMAGE_SIZE = 256
 BODY_IMAGE_SIZE = 384
 MGIF_IMAGE_SIZE = 256
 
-def get_face_model():
+def get_drive_face_keypoint_model():
+    """Create model."""
+
+    model = motion.KeyPointDetector(model_path="models/drive_face.pth")
+    device = todos.model.get_device()
+    model = model.to(device)
+    model.eval()
+
+    print(f"Running on {device} ...")
+    # make sure model good for C/C++
+    model = torch.jit.script(model)
+    # https://github.com/pytorch/pytorch/issues/52286
+    torch._C._jit_set_profiling_executor(False)
+    # C++ Reference
+    # torch::jit::getProfilingMode() = false;                                                                                                             
+    # torch::jit::setTensorExprFuserEnabled(false);
+
+    todos.data.mkdir("output")
+    if not os.path.exists("output/video_drive_face.torch"):
+        model.save("output/drive_face_keypoint.torch")
+
+    return model, device
+
+
+def get_drive_face_generator_model():
     """Create model."""
 
     model = motion.ImageAnimation(model_path="models/drive_face.pth")
@@ -45,8 +69,8 @@ def get_face_model():
     # torch::jit::setTensorExprFuserEnabled(false);
 
     todos.data.mkdir("output")
-    if not os.path.exists("output/video_drive_face.torch"):
-        model.save("output/video_drive_face.torch")
+    if not os.path.exists("output/drive_face_generator.torch"):
+        model.save("output/drive_face_generator.torch")
 
     return model, device
 
@@ -58,22 +82,29 @@ def drive_face(video_file, face_file, output_file):
         print(f"Read video {video_file} error.")
         return False
 
-    # load face image
-    face_image = Image.open(face_file).convert("RGB").resize((FACE_IMAGE_SIZE, FACE_IMAGE_SIZE))
-    face_tensor = transforms.ToTensor()(face_image).unsqueeze(0)
-
     # Create directory to store result
     output_dir = output_file[0 : output_file.rfind(".")]
     todos.data.mkdir(output_dir)
 
     # load model
-    model, device = get_face_model()
+    model, device = get_drive_face_generator_model()
+    kpdet, kpdev = get_drive_face_keypoint_model()
+    kpdet = kpdet.to(device)
+    print(f"Running on {device} ...")
+
+    # load face image
+    face_image = Image.open(face_file).convert("RGB").resize((FACE_IMAGE_SIZE, FACE_IMAGE_SIZE))
+    face_tensor = transforms.ToTensor()(face_image).unsqueeze(0)
+    face_tensor = face_tensor.to(device)
+    face_kp = todos.model.forward(kpdet, device, face_tensor)
+    face_kp = face_kp.to(device)
+    start_driving_kp = torch.zeros_like(face_kp)
 
     print(f"{video_file} driving {face_file}, save to {output_file} ...")
     progress_bar = tqdm(total=video.n_frames)
 
     def drive_video_frame(no, data):
-        # print(f"frame: {no} -- {data.shape}")
+        # print(f"-------> frame: {no} -- {data.shape}")
         progress_bar.update(1)
 
         driving_tensor = todos.data.frame_totensor(data)
@@ -81,8 +112,17 @@ def drive_face(video_file, face_file, output_file):
         # convert tensor from 1x4xHxW to 1x3xHxW
         driving_tensor = driving_tensor[:, 0:3, :, :]
         driving_tensor = todos.data.resize_tensor(driving_tensor, FACE_IMAGE_SIZE, FACE_IMAGE_SIZE)
+        driving_kp = todos.model.forward(kpdet, device, driving_tensor)
+        driving_kp = driving_kp.to(device)
+        if no == 0:
+            global start_driving_kp
+            start_driving_kp = driving_kp # save for next step offset kp
 
-        output_tensor = todos.model.two_forward(model, device, driving_tensor, face_tensor)
+        offset_driving_kp = driving_kp - start_driving_kp
+        # offset_driving_kp = offset_driving_kp.tanh()/2.0
+
+        with torch.no_grad():
+            output_tensor = model(face_kp, offset_driving_kp, face_tensor)
 
         temp_output_file = "{}/{:06d}.png".format(output_dir, no)
         todos.data.save_tensor(output_tensor, temp_output_file)

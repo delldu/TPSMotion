@@ -23,7 +23,7 @@ def test_input_shape():
 
     print("Test input shape ...")
 
-    model, device = image_animation.get_face_model()
+    model, device = image_animation.get_drive_face_generator_model()
 
     N = 100
     B, C, H, W = 1, 3, 256, 256
@@ -52,7 +52,7 @@ def test_input_shape():
 def run_bench_mark():
     print("Run benchmark ...")
 
-    model, device = image_animation.get_face_model()
+    model, device = image_animation.get_drive_face_generator_model()
     N = 100
     B, C, H, W = 1, 3, 256, 256
 
@@ -71,32 +71,31 @@ def run_bench_mark():
     os.system("nvidia-smi | grep python")
 
 
-def export_drive_face_onnx_model():
+def export_drive_face_keypoint_onnx_model():
     import onnx
     import onnxruntime
     from onnxsim import simplify
     import onnxoptimizer
 
-    print("Export onnx model ...")
+    print("Export drive_face_keypoint onnx model ...")
 
     # 1. Run torch model
-    model, device = image_animation.get_face_model()
+    model, device = image_animation.get_drive_face_keypoint_model()
 
     B, C, H, W = 1, 3, image_animation.FACE_IMAGE_SIZE, image_animation.FACE_IMAGE_SIZE
-    dummy_input1 = torch.randn(B, C, H, W).to(device)
-    dummy_input2 = torch.randn(B, C, H, W).to(device)
+    dummy_input = torch.randn(B, C, H, W).to(device)
 
     with torch.no_grad():
-        dummy_output = model(dummy_input1, dummy_input2)
+        dummy_output = model(dummy_input)
     torch_outputs = [dummy_output.cpu()]
 
     # 2. Export onnx model
-    input_names = [ "input1", "input2" ]
+    input_names = [ "input" ]
     output_names = [ "output" ]
-    onnx_filename = "output/video_drive_face.onnx"
+    onnx_filename = "output/drive_face_keypoint.onnx"
 
     torch.onnx.export(model, 
-        (dummy_input1, dummy_input2),
+        (dummy_input),
         onnx_filename, 
         verbose=False, 
         input_names=input_names, 
@@ -108,8 +107,8 @@ def export_drive_face_onnx_model():
     onnx_model = onnx.load(onnx_filename)
     onnx.checker.check_model(onnx_model)
 
-    # onnx_model, check = simplify(onnx_model)
-    # assert check, "Simplified ONNX model could not be validated"
+    onnx_model, check = simplify(onnx_model)
+    assert check, "Simplified ONNX model could not be validated"
     onnx_model = onnxoptimizer.optimize(onnx_model)
     onnx.save(onnx_model, onnx_filename)
     # print(onnx.helper.printable_graph(onnx_model.graph))
@@ -123,7 +122,77 @@ def export_drive_face_onnx_model():
     def to_numpy(tensor):
         return tensor.detach().cpu().numpy() if tensor.requires_grad else tensor.cpu().numpy()
 
-    onnx_inputs = {input_names[0]: to_numpy(dummy_input1), input_names[1]: to_numpy(dummy_input2) }
+    onnx_inputs = { input_names[0]: to_numpy(dummy_input), 
+                }
+    onnx_outputs = ort_session.run(None, onnx_inputs)
+
+    # 5.Compare output results
+    assert len(torch_outputs) == len(onnx_outputs)
+    for torch_output, onnx_output in zip(torch_outputs, onnx_outputs):
+        torch.testing.assert_close(torch_output, torch.tensor(onnx_output), rtol=0.01, atol=0.01)
+
+    todos.model.reset_device()
+
+    print("!!!!!! Torch and ONNX Runtime output matched !!!!!!")
+
+
+def export_drive_face_generator_onnx_model():
+    import onnx
+    import onnxruntime
+    from onnxsim import simplify
+    import onnxoptimizer
+
+    print("Export drive_face_generator onnx model ...")
+
+    # 1. Run torch model
+    model, device = image_animation.get_drive_face_generator_model()
+
+    B, C, H, W = 1, 3, image_animation.FACE_IMAGE_SIZE, image_animation.FACE_IMAGE_SIZE
+    dummy_input1 = torch.randn(B, 50, 2).to(device)
+    dummy_input2 = torch.randn(B, 50, 2).to(device)
+    dummy_input3 = torch.randn(B, C, H, W).to(device)
+
+    with torch.no_grad():
+        dummy_output = model(dummy_input1, dummy_input2, dummy_input3)
+    torch_outputs = [dummy_output.cpu()]
+
+    # 2. Export onnx model
+    input_names = [ "input1", "input2", "input3" ]
+    output_names = [ "output" ]
+    onnx_filename = "output/drive_face_generator.onnx"
+
+    torch.onnx.export(model, 
+        (dummy_input1, dummy_input2, dummy_input3),
+        onnx_filename, 
+        verbose=False, 
+        input_names=input_names, 
+        output_names=output_names,
+        opset_version=17,
+    )
+
+    # 3. Check onnx model file
+    onnx_model = onnx.load(onnx_filename)
+    onnx.checker.check_model(onnx_model)
+
+    onnx_model, check = simplify(onnx_model)
+    assert check, "Simplified ONNX model could not be validated"
+    onnx_model = onnxoptimizer.optimize(onnx_model)
+    onnx.save(onnx_model, onnx_filename)
+    # print(onnx.helper.printable_graph(onnx_model.graph))
+
+    # 4. Run onnx model
+    if 'cuda' in device.type:
+        ort_session = onnxruntime.InferenceSession(onnx_filename, providers=['CUDAExecutionProvider'])
+    else:        
+        ort_session = onnxruntime.InferenceSession(onnx_filename, providers=['CPUExecutionProvider'])
+
+    def to_numpy(tensor):
+        return tensor.detach().cpu().numpy() if tensor.requires_grad else tensor.cpu().numpy()
+
+    onnx_inputs = { input_names[0]: to_numpy(dummy_input1), 
+                    input_names[1]: to_numpy(dummy_input2),
+                    input_names[2]: to_numpy(dummy_input3),
+                }
     onnx_outputs = ort_session.run(None, onnx_inputs)
 
     # 5.Compare output results
@@ -280,7 +349,8 @@ if __name__ == "__main__":
     if args.bench_mark:
         run_bench_mark()
     if args.export_onnx:
-        export_drive_face_onnx_model()
+        # export_drive_face_keypoint_onnx_model()
+        export_drive_face_generator_onnx_model()
         # export_drive_body_onnx_model()
         # export_drive_mgif_onnx_model()
     

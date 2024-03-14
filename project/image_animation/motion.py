@@ -425,7 +425,7 @@ class KeyPointDetector(nn.Module):
     """
     Predict K*5 keypoints, here K == 10
     """
-    def __init__(self, num_tps=10):
+    def __init__(self, num_tps=10, model_path="models/drive_face.pth"):
         super().__init__()
         self.num_tps = num_tps
         self.fg_encoder = models.resnet18(weights=None)
@@ -433,29 +433,26 @@ class KeyPointDetector(nn.Module):
         self.fg_encoder.fc = nn.Linear(num_features, num_tps * 5 * 2)  # (512, 100)
 
         # first_kp for relative keypoints detection
-        self.register_buffer("first_kp", torch.zeros(1, self.num_tps * 5, 2))
+        # self.register_buffer("first_kp", torch.zeros(1, self.num_tps * 5, 2))
+        self.load_weights(model_path = model_path)
 
-    def forward(self, image, standard:bool=True):
-        if standard:
-            return self.detect_source(image)
-        # else
-        return self.detect_drive(image)
+    def forward(self, image):
+        return self.detect_source(image)
 
-    def detect_drive(self, image):
-        # image.size() -- [1, 3, 256, 256]
-        B, C, H, W = image.size()
-        output_kp = self.detect_source(image)
+    # def detect_drive(self, image):
+    #     # image.size() -- [1, 3, 256, 256]
+    #     B, C, H, W = image.size()
+    #     output_kp = self.detect_source(image)
 
-        # xxxx_8888
-        # relative keypoints case
-        if self.first_kp.abs().max() < 1e-5:
-            # ==> pdb.set_trace()
-            print(f"Updating first key points ...")
-            self.first_kp = output_kp[0:1, :, :]
+    #     # relative keypoints case
+    #     if self.first_kp.abs().max() < 1e-5:
+    #         # ==> pdb.set_trace()
+    #         print(f"Updating first key points ...")
+    #         self.first_kp = output_kp[0:1, :, :]
 
-        offset = output_kp - self.first_kp.repeat(B, 1, 1)
+    #     offset = output_kp - self.first_kp.repeat(B, 1, 1)
 
-        return offset.tanh()/2.0
+    #     return offset.tanh()/2.0
 
     def detect_source(self, image):
         # image.size() -- [1, 3, 256, 256]
@@ -466,6 +463,12 @@ class KeyPointDetector(nn.Module):
 
         output_kp = fg_kp.view(B, self.num_tps * 5, -1)  # [1, 50, 2]
         return output_kp
+
+    def load_weights(self, model_path="models/drive_face.pth"):
+        cdir = os.path.dirname(__file__)
+        checkpoint = model_path if cdir == "" else cdir + "/" + model_path
+        sd = torch.load(checkpoint)
+        self.load_state_dict(sd['kp_detector'])
 
 
 class DenseMotionNetwork(nn.Module):
@@ -721,7 +724,7 @@ class InpaintingNetwork(nn.Module):
 class ImageAnimation(nn.Module):
     def __init__(self, model_path):
         super().__init__()
-        self.keypoint_detector = KeyPointDetector()
+        # self.keypoint_detector = KeyPointDetector()
         self.dense_motion = DenseMotionNetwork()
         self.generator = InpaintingNetwork()
 
@@ -734,22 +737,18 @@ class ImageAnimation(nn.Module):
         checkpoint = model_path if cdir == "" else cdir + "/" + model_path
         sd = torch.load(checkpoint)
 
-        sd['kp_detector']['first_kp'] = torch.zeros(1, 50, 2) # add our init paramters
+        # sd['kp_detector']['first_kp'] = torch.zeros(1, 50, 2) # add our init paramters
         self.generator.load_state_dict(sd['inpainting_network'])
-        self.keypoint_detector.load_state_dict(sd['kp_detector'])
+        # self.keypoint_detector.load_state_dict(sd['kp_detector'])
         self.dense_motion.load_state_dict(sd['dense_motion_network'])
 
-
-    def forward(self, drive_tensor, source_tensor):
-        # tensor [source_tensor] size: [1, 3, 256, 256], min: 0.0, max: 1.0, mean: 0.629024
-        source_kp = self.keypoint_detector.detect_source(source_tensor)
+    # def forward(self, drive_tensor, source_tensor):
+    def forward(self, source_kp, offset_kp, source_tensor):
         # tensor [source_kp] size: [1, 50, 2], min: -0.998097, max: 0.977059, mean: -0.015133
+        # tensor [offset_kp] size: [1, 50, 2], min: -0.998392, max: 0.975835, mean: 0.013823
+        # tensor [source_tensor] size: [1, 3, 256, 256], min: 0.0, max: 1.0, mean: 0.629024
 
-        driving_kp = self.keypoint_detector.detect_drive(drive_tensor) # driving_kp - first_kp
-        # ==> driving_kp is offset_kp !!!
-        # tensor [driving_kp] size: [1, 50, 2], min: -0.998392, max: 0.975835, mean: 0.013823
-        target_kp = source_kp + driving_kp
-        # target_kp = driving_kp
+        target_kp = source_kp + offset_kp
 
         dense_motion = self.dense_motion(source_tensor, target_kp, source_kp)
         # dense_motion is list: len = 5
